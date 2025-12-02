@@ -29,13 +29,58 @@
   border-radius: 8px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   padding: 1.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.file-upload-section {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #eee;
+}
+
+.file-upload-button {
+  background-color: #3498db;
+  color: white;
+  padding: 0.75rem 1.5rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: background-color 0.2s;
+}
+
+.file-upload-button:hover {
+  background-color: #2980b9;
+}
+
+.file-input {
+  display: none;
+}
+
+.status-text {
+  color: #666;
+  font-style: italic;
+  margin: 0;
+}
+
+.error-text {
+  color: #e74c3c;
+  margin: 0;
+  font-size: 0.9rem;
 }
 
 .score-container {
-  width: 100%;
-  height: 100%;
+  flex: 1;
+  min-height: 400px;
   border: 2px dashed #ddd;
   border-radius: 4px;
+  overflow: auto;
+}
+
+.score-container:empty {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -60,4 +105,43 @@
 .control-panel p {
   color: #666;
   font-style: italic;
+}
+
+.timeline-debug {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: 4px;
+  border-left: 4px solid #007bff;
+}
+
+.timeline-debug h4 {
+  margin: 0 0 0.5rem 0;
+  color: #007bff;
+  font-size: 1rem;
+}
+
+.timeline-debug p {
+  margin: 0.25rem 0;
+  font-size: 0.9rem;
+  color: #333;
+}
+
+.timeline-debug details {
+  margin-top: 0.5rem;
+}
+
+.timeline-debug summary {
+  cursor: pointer;
+  font-weight: 500;
+  color: #007bff;
+}
+
+.timeline-debug ul {
+  margin: 0.5rem 0 0 1rem;
+  font-size: 0.85rem;
+}
+
+.timeline-debug li {
+  margin: 0.25rem 0;
 }
