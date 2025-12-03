@@ -291,3 +291,150 @@
 .voice-buttons button.active:hover {
   background-color: #c82333;
 }
+
+/* Reference Tone Trainer */
+.reference-tone {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: #fff3cd;
+  border-radius: 6px;
+  border: 2px solid #ffc107;
+}
+
+.reference-tone h4 {
+  margin: 0 0 0.75rem 0;
+  color: #856404;
+  font-size: 1rem;
+}
+
+.reference-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.ref-adjust {
+  width: 40px;
+  height: 40px;
+  background-color: #ffc107;
+  color: #856404;
+  border: none;
+  border-radius: 50%;
+  font-size: 1.5rem;
+  font-weight: bold;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ref-adjust:hover {
+  background-color: #e0a800;
+}
+
+.ref-note-display {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #856404;
+  min-width: 80px;
+  text-align: center;
+}
+
+.ref-play-button {
+  width: 100%;
+  padding: 0.75rem;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+.ref-play-button:hover {
+  opacity: 0.9;
+}
+
+/* Pitch Detector / Tuner */
+.pitch-detector {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: #f8f9fa;
+  border-radius: 6px;
+  border: 2px solid #007bff;
+}
+
+.pitch-detector h4 {
+  margin: 0 0 0.75rem 0;
+  color: #007bff;
+  font-size: 1rem;
+}
+
+.pitch-detector button {
+  width: 100%;
+  padding: 0.75rem;
+  background-color: #28a745;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-weight: 500;
+  font-size: 0.95rem;
+}
+
+.pitch-detector button:hover {
+  background-color: #218838;
+}
+
+.pitch-display {
+  margin-top: 1rem;
+  padding: 1rem;
+  background-color: white;
+  border-radius: 4px;
+  border: 1px solid #dee2e6;
+}
+
+.pitch-frequency {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 0.5rem;
+}
+
+.pitch-target {
+  font-size: 0.9rem;
+  color: #856404;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+  background-color: #fff3cd;
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+}
+
+.pitch-note {
+  font-size: 1.5rem;
+  font-weight: 700;
+  color: #007bff;
+  margin: 0.5rem 0;
+}
+
+.pitch-cents {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin: 0.5rem 0;
+}
+
+.pitch-clarity {
+  font-size: 0.9rem;
+  color: #666;
+  margin-top: 0.5rem;
+}
+
+.pitch-no-signal {
+  color: #999;
+  font-style: italic;
+  text-align: center;
+  padding: 1rem;
+}

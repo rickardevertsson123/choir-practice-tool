@@ -3,8 +3,17 @@ import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import JSZip from 'jszip'
 import { ScoreTimeline, VoiceId } from '../types/ScoreTimeline'
 import { buildScoreTimelineFromMusicXml, extractPartMetadata, buildVoiceDisplayLabel, PartMetadata } from '../utils/musicXmlParser'
-import { ScorePlayer, VoiceMixerSettings } from '../audio/ScorePlayer'
+import { ScorePlayer, VoiceMixerSettings, midiToFrequency } from '../audio/ScorePlayer'
+import { detectPitch, frequencyToNoteInfo, PitchResult } from '../audio/pitchDetection'
 import './ScorePlayerPage.css'
+
+const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+
+function midiToNoteName(midi: number): string {
+  const noteIndex = midi % 12;
+  const octave = Math.floor(midi / 12) - 1;
+  return NOTE_NAMES[noteIndex] + octave;
+}
 
 function ScorePlayerPage() {
   const scoreContainerRef = useRef<HTMLDivElement>(null)
@@ -19,6 +28,20 @@ function ScorePlayerPage() {
   const [partMetadata, setPartMetadata] = useState<PartMetadata[]>([])
   const cursorStepsRef = useRef<Array<{ step: number; musicalTime: number }>>([])
   const playerRef = useRef<ScorePlayer | null>(null)
+  
+  // Pitch detection state
+  const [micActive, setMicActive] = useState(false)
+  const [pitchResult, setPitchResult] = useState<PitchResult>({ frequency: null, clarity: 0 })
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const analyserRef = useRef<AnalyserNode | null>(null)
+  const micStreamRef = useRef<MediaStream | null>(null)
+  const animationFrameRef = useRef<number>(0)
+  
+  // Reference tone state
+  const [referenceMidi, setReferenceMidi] = useState(69) // A4
+  const [isRefPlaying, setIsRefPlaying] = useState(false)
+  const refOscillatorRef = useRef<OscillatorNode | null>(null)
+  const refGainRef = useRef<GainNode | null>(null)
 
   // Initiera OSMD när komponenten mountas
   useEffect(() => {
@@ -351,6 +374,132 @@ function ScorePlayerPage() {
       playerRef.current.setVoiceSettings(voice, settings)
     }
   }
+  
+  // Aktivera mikrofon och starta pitch detection
+  const handleMicToggle = async () => {
+    if (micActive) {
+      // Stoppa mikrofon
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach(track => track.stop())
+        micStreamRef.current = null
+      }
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+      setMicActive(false)
+      setPitchResult({ frequency: null, clarity: 0 })
+    } else {
+      // Starta mikrofon
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        micStreamRef.current = stream
+        
+        // Skapa AudioContext om den inte finns
+        if (!audioContextRef.current) {
+          audioContextRef.current = new AudioContext()
+        }
+        
+        // Skapa audio nodes
+        const source = audioContextRef.current.createMediaStreamSource(stream)
+        const analyser = audioContextRef.current.createAnalyser()
+        analyser.fftSize = 4096
+        analyser.smoothingTimeConstant = 0.8
+        
+        source.connect(analyser)
+        analyserRef.current = analyser
+        
+        setMicActive(true)
+        
+        // Starta pitch detection loop
+        const detectLoop = () => {
+          if (!analyserRef.current) return
+          
+          const buffer = new Float32Array(analyserRef.current.fftSize)
+          analyserRef.current.getFloatTimeDomainData(buffer)
+          
+          const result = detectPitch(buffer, audioContextRef.current!.sampleRate)
+          setPitchResult(result)
+          
+          animationFrameRef.current = requestAnimationFrame(detectLoop)
+        }
+        
+        detectLoop()
+      } catch (err) {
+        console.error('Kunde inte aktivera mikrofon:', err)
+        setError('Kunde inte aktivera mikrofon. Kontrollera behörigheter.')
+      }
+    }
+  }
+  
+  // Spela referenston
+  const playReferenceTone = () => {
+    if (isRefPlaying) {
+      // Stoppa ton
+      if (refOscillatorRef.current && refGainRef.current) {
+        const now = audioContextRef.current!.currentTime;
+        refGainRef.current.gain.setTargetAtTime(0, now, 0.05); // Fade out
+        setTimeout(() => {
+          refOscillatorRef.current?.stop();
+          refOscillatorRef.current = null;
+          refGainRef.current = null;
+        }, 200);
+      }
+      setIsRefPlaying(false);
+    } else {
+      // Starta ton
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContext();
+      }
+      
+      const osc = audioContextRef.current.createOscillator();
+      const gain = audioContextRef.current.createGain();
+      
+      osc.type = 'sine';
+      osc.frequency.value = midiToFrequency(referenceMidi);
+      
+      gain.gain.value = 0;
+      osc.connect(gain);
+      gain.connect(audioContextRef.current.destination);
+      
+      const now = audioContextRef.current.currentTime;
+      gain.gain.setTargetAtTime(0.3, now, 0.02); // Fade in
+      
+      osc.start(now);
+      
+      refOscillatorRef.current = osc;
+      refGainRef.current = gain;
+      setIsRefPlaying(true);
+      
+      // Auto-stop efter 2.5 sekunder
+      setTimeout(() => {
+        if (refGainRef.current && refOscillatorRef.current) {
+          const stopTime = audioContextRef.current!.currentTime;
+          refGainRef.current.gain.setTargetAtTime(0, stopTime, 0.05);
+          setTimeout(() => {
+            refOscillatorRef.current?.stop();
+            refOscillatorRef.current = null;
+            refGainRef.current = null;
+            setIsRefPlaying(false);
+          }, 200);
+        }
+      }, 2500);
+    }
+  };
+  
+  // Cleanup vid unmount
+  useEffect(() => {
+    return () => {
+      if (micStreamRef.current) {
+        micStreamRef.current.getTracks().forEach(track => track.stop())
+      }
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current)
+      }
+      if (refOscillatorRef.current) {
+        refOscillatorRef.current.stop();
+      }
+    }
+  }, [])
 
   return (
     <div className="score-player-page">
@@ -406,9 +555,91 @@ function ScorePlayerPage() {
         
         <aside className="control-panel">
           <h3>Kontroller</h3>
-          <p>Kontroller kommer här</p>
+          
+          {/* Reference Tone Trainer */}
+          <div className="reference-tone">
+            <h4>🔔 Referenston-träning</h4>
+            
+            <div className="reference-controls">
+              <button 
+                onClick={() => setReferenceMidi(Math.max(48, referenceMidi - 1))}
+                className="ref-adjust"
+              >
+                –
+              </button>
+              <div className="ref-note-display">
+                {midiToNoteName(referenceMidi)}
+              </div>
+              <button 
+                onClick={() => setReferenceMidi(Math.min(84, referenceMidi + 1))}
+                className="ref-adjust"
+              >
+                +
+              </button>
+            </div>
+            
+            <button 
+              onClick={playReferenceTone}
+              className="ref-play-button"
+              style={{ backgroundColor: isRefPlaying ? '#dc3545' : '#28a745' }}
+            >
+              {isRefPlaying ? 'Stoppa ton' : 'Spela referenston'}
+            </button>
+          </div>
+          
+          {/* Pitch Detection / Tuner */}
+          <div className="pitch-detector">
+            <h4>Tuner</h4>
+            <button onClick={handleMicToggle}>
+              {micActive ? 'Stoppa mikrofon' : 'Aktivera mikrofon'}
+            </button>
+            
+            {micActive && (
+              <div className="pitch-display">
+                {pitchResult.frequency ? (
+                  <>
+                    <div className="pitch-frequency">
+                      Frekvens: {pitchResult.frequency.toFixed(1)} Hz
+                    </div>
+                    {(() => {
+                      const noteInfo = frequencyToNoteInfo(pitchResult.frequency)
+                      if (noteInfo) {
+                        // Beräkna avvikelse relativt referenston
+                        const refCents = (noteInfo.midi - referenceMidi) * 100 + noteInfo.centsOff;
+                        
+                        return (
+                          <>
+                            <div className="pitch-target">
+                              Målton: {midiToNoteName(referenceMidi)}
+                            </div>
+                            <div className="pitch-note">
+                              Din ton: {noteInfo.noteName}
+                            </div>
+                            <div className="pitch-cents" style={{
+                              color: Math.abs(refCents) < 10 ? 'green' : 
+                                     Math.abs(refCents) < 25 ? 'orange' : 'red'
+                            }}>
+                              Avvikelse: {refCents > 0 ? '+' : ''}{Math.round(refCents)} cent
+                            </div>
+                            <div className="pitch-clarity">
+                              Klarhet: {Math.round(pitchResult.clarity * 100)}%
+                            </div>
+                          </>
+                        )
+                      }
+                      return null
+                    })()}
+                  </>
+                ) : (
+                  <div className="pitch-no-signal">
+                    Ingen stabil pitch detekterad
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
           {scoreTimeline && (
-            <div className="player-controls">
+            <div className="player-controls" style={{ marginTop: '20px' }}>
               <h3>Spelare</h3>
               
               <div className="transport-controls">
