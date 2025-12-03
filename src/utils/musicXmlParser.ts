@@ -1,5 +1,28 @@
 import { ScoreTimeline, NoteEvent, VoiceId } from '../types/ScoreTimeline';
 
+export interface PartMetadata {
+  partId: string;
+  partName: string;
+}
+
+export function extractPartMetadata(xml: string): PartMetadata[] {
+  const parser = new DOMParser();
+  const xmlDoc = parser.parseFromString(xml, "application/xml");
+  const scoreParts = xmlDoc.querySelectorAll('score-part');
+  
+  const metadata: PartMetadata[] = [];
+  
+  for (const scorePart of scoreParts) {
+    const partId = scorePart.getAttribute('id') || '';
+    const partNameElement = scorePart.querySelector('part-name');
+    const partName = partNameElement?.textContent?.trim() || partId;
+    
+    metadata.push({ partId, partName });
+  }
+  
+  return metadata;
+}
+
 export async function buildScoreTimelineFromMusicXml(xml: string): Promise<ScoreTimeline> {
   const parser = new DOMParser();
   const xmlDoc = parser.parseFromString(xml, "application/xml");
@@ -7,7 +30,6 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
   const soundElement = xmlDoc.querySelector('sound[tempo]');
   const tempoBpm = soundElement ? parseInt(soundElement.getAttribute('tempo') || '120') : 120;
   
-  const partToVoiceMap = buildPartToVoiceMapping(xmlDoc);
   const notes: NoteEvent[] = [];
   let noteIdCounter = 0;
   const partDurations: number[] = [];
@@ -16,7 +38,8 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
   
   for (const part of parts) {
     const partId = part.getAttribute('id') || '';
-    const voice = partToVoiceMap[partId] || partId;
+    
+    console.log(`🎵 Processing part ${partId}`);
     
     // Per-voice tidsräknare - varje voice har egen oberoende tidslinje
     const currentTimeBeatsByVoice = new Map<string, number>();
@@ -32,6 +55,12 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
         currentDivisions = parseInt(divisionsElement.textContent || '1');
       }
 
+      // Spara voice-tider vid taktens början för att beräkna taktlängd senare
+      const measureStartTimesByVoice = new Map<string, number>();
+      for (const [voiceKey, time] of currentTimeBeatsByVoice) {
+        measureStartTimesByVoice.set(voiceKey, time);
+      }
+      
       // Reset alla voices till taktens början
       for (const voiceKey of currentTimeBeatsByVoice.keys()) {
         currentTimeBeatsByVoice.set(voiceKey, measureStartBeats);
@@ -87,9 +116,13 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
         if (pitchElement) {
           const midiPitch = convertPitchToMidi(pitchElement);
           
+          // NoteEvent.voice är tekniskt (partId, xmlVoice)
+          // UI-labels baseras på part-name + antal voices per part
+          const voiceId: VoiceId = `${partId}-v${xmlVoice}`;
+          
           const noteEvent: NoteEvent = {
-            id: `${voice}-${xmlVoice}-${noteIdCounter++}`,
-            voice,
+            id: `${voiceId}-${noteIdCounter++}`,
+            voice: voiceId,
             startTimeSeconds,
             durationSeconds,
             midiPitch
@@ -105,11 +138,19 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
         }
       }
       
-      // Nästa takt börjar efter denna takts längd (3 beats i 3/4-takt)
-      measureStartBeats += 3; // 3/4 takt
+      // Beräkna taktens faktiska längd baserat på längsta voice
+      // Detta hanterar ofullständiga takter (pickup/anacrusis) korrekt
+      let maxVoiceTime = measureStartBeats;
+      for (const time of currentTimeBeatsByVoice.values()) {
+        maxVoiceTime = Math.max(maxVoiceTime, time);
+      }
+      
+      const measureLengthBeats = maxVoiceTime - measureStartBeats;
+      measureStartBeats = maxVoiceTime;
     }
     
-    const partNotes = notes.filter(note => note.voice === voice);
+    // Beräkna duration för alla voices i denna part
+    const partNotes = notes.filter(note => note.id.includes(partId));
     const partDuration = partNotes.reduce((max, note) => 
       Math.max(max, note.startTimeSeconds + note.durationSeconds), 0
     );
@@ -125,37 +166,36 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
   };
 }
 
-function buildPartToVoiceMapping(xmlDoc: Document): Record<string, VoiceId> {
-  const mapping: Record<string, VoiceId> = {};
+export function buildVoiceDisplayLabel(voiceId: VoiceId, allVoices: VoiceId[], partMetadata: PartMetadata[]): string {
+  // Parse voiceId format: "P1-v1"
+  const match = voiceId.match(/^(.+)-v(\d+)$/);
+  if (!match) return voiceId;
   
-  const scoreParts = xmlDoc.querySelectorAll('score-part');
+  const [, partId, xmlVoice] = match;
   
-  for (const scorePart of scoreParts) {
-    const partId = scorePart.getAttribute('id') || '';
-    const partNameElement = scorePart.querySelector('part-name');
-    const partName = partNameElement?.textContent?.toLowerCase() || '';
-    
-    let voice: VoiceId = partId; // fallback
-    
-    if (partName.includes('sop')) {
-      voice = 'Soprano';
-    } else if (partName.includes('alt')) {
-      voice = 'Alto';
-    } else if (partName.includes('ten')) {
-      voice = 'Tenor';
-    } else if (partName.includes('bas') || partName.includes('bass')) {
-      voice = 'Bass';
-    } else if (partName.includes('keyboard') || partName.includes('piano') || partName.includes('rehearsal')) {
-      voice = 'Rehearsal keyboard';
-    } else if (partNameElement?.textContent) {
-      voice = partNameElement.textContent;
-    }
-    
-    mapping[partId] = voice;
+  // Hitta part-name
+  const part = partMetadata.find(p => p.partId === partId);
+  const baseName = part?.partName || partId;
+  
+  // Räkna antal voices för denna part
+  const voicesForPart = allVoices.filter(v => v.startsWith(`${partId}-v`));
+  
+  // Om generiskt namn som "MusicXML Part", använd partId istället
+  const displayBase = (baseName === "MusicXML Part" || baseName.toLowerCase().includes("musicxml")) 
+    ? partId 
+    : baseName;
+  
+  // Om bara en voice i parten, visa bara baseName
+  if (voicesForPart.length === 1) {
+    return displayBase;
   }
   
-  return mapping;
+  // Annars visa "baseName v1", "baseName v2" etc
+  return `${displayBase} v${xmlVoice}`;
 }
+
+
+
 
 function convertPitchToMidi(pitchElement: Element): number {
   const step = pitchElement.querySelector('step')?.textContent || 'C';

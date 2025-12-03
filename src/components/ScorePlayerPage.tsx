@@ -2,7 +2,7 @@ import { useRef, useEffect, useState } from 'react'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import JSZip from 'jszip'
 import { ScoreTimeline, VoiceId } from '../types/ScoreTimeline'
-import { buildScoreTimelineFromMusicXml } from '../utils/musicXmlParser'
+import { buildScoreTimelineFromMusicXml, extractPartMetadata, buildVoiceDisplayLabel, PartMetadata } from '../utils/musicXmlParser'
 import { ScorePlayer, VoiceMixerSettings } from '../audio/ScorePlayer'
 import './ScorePlayerPage.css'
 
@@ -16,6 +16,7 @@ function ScorePlayerPage() {
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [voiceSettings, setVoiceSettings] = useState<Record<VoiceId, VoiceMixerSettings>>({})
+  const [partMetadata, setPartMetadata] = useState<PartMetadata[]>([])
   const cursorStepsRef = useRef<Array<{ step: number; musicalTime: number }>>([])
   const playerRef = useRef<ScorePlayer | null>(null)
 
@@ -25,7 +26,9 @@ function ScorePlayerPage() {
       try {
         osmdRef.current = new OpenSheetMusicDisplay(scoreContainerRef.current, {
           autoResize: true,
-          backend: 'svg'
+          backend: 'svg',
+          followCursor: true,
+          drawingParameters: 'compact'
         })
         console.log('OSMD initialiserat')
       } catch (err) {
@@ -75,20 +78,12 @@ function ScorePlayerPage() {
         osmdRef.current.cursor.reset()
       }
       
+      // Extrahera part-metadata
+      const metadata = extractPartMetadata(xmlContent)
+      setPartMetadata(metadata)
+      
       // Bygg ScoreTimeline
       const timeline = await buildScoreTimelineFromMusicXml(xmlContent)
-      
-      // Debug: Verifiera Rehearsal keyboard noter
-      const keyboardNotes = timeline.notes
-        .filter(n => n.voice === "Rehearsal keyboard")
-        .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds)
-        .slice(0, 15);
-      
-      console.log("First Rehearsal keyboard notes:", keyboardNotes.map(n => ({
-        start: n.startTimeSeconds.toFixed(2),
-        duration: n.durationSeconds.toFixed(2),
-        midi: n.midiPitch,
-      })));
       
       setScoreTimeline(timeline)
       setCurrentTime(0)
@@ -108,18 +103,65 @@ function ScorePlayerPage() {
       const arrayBuffer = await file.arrayBuffer()
       const zip = await JSZip.loadAsync(arrayBuffer)
       
-      // Leta efter score.xml eller liknande XML-fil
-      const xmlFile = zip.file('score.xml') || 
-                     Object.values(zip.files).find(f => f.name.endsWith('.xml') && !f.dir)
+      // Hitta huvudfilen från container.xml
+      let xmlFile = null
+      const containerFile = zip.file('META-INF/container.xml')
+      
+      if (containerFile) {
+        const containerXml = await containerFile.async('text')
+        const containerDoc = new DOMParser().parseFromString(containerXml, 'application/xml')
+        const rootfile = containerDoc.querySelector('rootfile')
+        const fullPath = rootfile?.getAttribute('full-path')
+        
+        if (fullPath) {
+          xmlFile = zip.file(fullPath)
+        }
+      }
+      
+      // Fallback: leta efter score.xml eller första XML-fil
+      if (!xmlFile) {
+        xmlFile = zip.file('score.xml') || 
+                  Object.values(zip.files).find(f => 
+                    (f.name.endsWith('.xml') || f.name.endsWith('.musicxml')) && 
+                    !f.dir && 
+                    !f.name.includes('META-INF')
+                  )
+      }
       
       if (!xmlFile) {
         throw new Error('Ingen XML-fil hittades i MXL-arkivet')
       }
       
-      return await xmlFile.async('text')
+      const xmlContent = await xmlFile.async('text')
+      
+      // Kontrollera XML-format
+      const parser = new DOMParser()
+      const xmlDoc = parser.parseFromString(xmlContent, 'application/xml')
+      const rootElement = xmlDoc.documentElement.nodeName
+      
+      console.log('XML root element:', rootElement)
+      
+      if (rootElement === 'score-timewise') {
+        throw new Error('Timewise MusicXML stöds inte ännu')
+      }
+      
+      return xmlContent
     } else {
       // Hantera vanliga XML-filer
-      return await file.text()
+      const xmlContent = await file.text()
+      
+      // Kontrollera XML-format
+      const parser = new DOMParser()
+      const xmlDoc = parser.parseFromString(xmlContent, 'application/xml')
+      const rootElement = xmlDoc.documentElement.nodeName
+      
+      console.log('XML root element:', rootElement)
+      
+      if (rootElement === 'score-timewise') {
+        throw new Error('Timewise MusicXML stöds inte ännu')
+      }
+      
+      return xmlContent
     }
   }
 
@@ -393,14 +435,18 @@ function ScorePlayerPage() {
               
               <div className="voice-mixer">
                 <h4>Stämmor</h4>
-                {getVoices().map(voice => (
-                  <VoiceControl
-                    key={voice}
-                    voice={voice}
-                    settings={getVoiceSettings(voice)}
-                    onSettingsChange={(settings) => handleVoiceSettingsChange(voice, settings)}
-                  />
-                ))}
+                {getVoices().map(voice => {
+                  const displayLabel = buildVoiceDisplayLabel(voice, getVoices(), partMetadata)
+                  return (
+                    <VoiceControl
+                      key={voice}
+                      voice={voice}
+                      displayLabel={displayLabel}
+                      settings={getVoiceSettings(voice)}
+                      onSettingsChange={(settings) => handleVoiceSettingsChange(voice, settings)}
+                    />
+                  )
+                })}
               </div>
             </div>
           )}
@@ -412,14 +458,15 @@ function ScorePlayerPage() {
 
 interface VoiceControlProps {
   voice: VoiceId
+  displayLabel: string
   settings: VoiceMixerSettings
   onSettingsChange: (settings: Partial<VoiceMixerSettings>) => void
 }
 
-function VoiceControl({ voice, settings, onSettingsChange }: VoiceControlProps) {
+function VoiceControl({ voice, displayLabel, settings, onSettingsChange }: VoiceControlProps) {
   return (
     <div className="voice-control">
-      <div className="voice-name">{voice}</div>
+      <div className="voice-name">{displayLabel}</div>
       
       <div className="voice-volume">
         <label>Vol: {Math.round(settings.volume * 100)}%</label>
