@@ -8,6 +8,7 @@ import './ScorePlayerPage.css'
 
 function ScorePlayerPage() {
   const scoreContainerRef = useRef<HTMLDivElement>(null)
+  const playheadRef = useRef<HTMLDivElement>(null)
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null)
   const [error, setError] = useState<string>('')
   const [isLoading, setIsLoading] = useState(false)
@@ -15,6 +16,7 @@ function ScorePlayerPage() {
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
   const [voiceSettings, setVoiceSettings] = useState<Record<VoiceId, VoiceMixerSettings>>({})
+  const cursorStepsRef = useRef<Array<{ step: number; musicalTime: number }>>([])
   const playerRef = useRef<ScorePlayer | null>(null)
 
   // Initiera OSMD när komponenten mountas
@@ -47,6 +49,30 @@ function ScorePlayerPage() {
       if (osmdRef.current) {
         await osmdRef.current.load(xmlContent)
         osmdRef.current.render()
+        
+        // Initiera cursor och bygg musical-time mapping
+        osmdRef.current.cursor.show()
+        osmdRef.current.cursor.reset()
+        
+        const steps: Array<{ step: number; musicalTime: number }> = []
+        let i = 0
+        
+        while (!osmdRef.current.cursor.Iterator.EndReached) {
+          const timestamp = osmdRef.current.cursor.Iterator.CurrentSourceTimestamp
+          steps.push({
+            step: i,
+            musicalTime: timestamp ? timestamp.RealValue : 0
+          })
+          
+          osmdRef.current.cursor.next()
+          i++
+        }
+        
+        cursorStepsRef.current = steps
+        console.log(`Byggde cursor mapping: ${steps.length} steg, max musical time: ${steps[steps.length - 1]?.musicalTime || 0} beats`)
+        
+        // Reset till början
+        osmdRef.current.cursor.reset()
       }
       
       // Bygg ScoreTimeline
@@ -143,26 +169,118 @@ function ScorePlayerPage() {
     return () => clearInterval(interval)
   }, [scoreTimeline])
 
+  // Playhead animation loop med OSMD Cursor (musical-time baserad)
+  useEffect(() => {
+    if (!playerRef.current || !osmdRef.current || !playheadRef.current || !scoreTimeline) return
+    if (cursorStepsRef.current.length === 0) return
+
+    let raf = 0
+    let lastStep = -1
+
+    function updateCursorPosition() {
+      if (!playerRef.current || !osmdRef.current || !playheadRef.current || !scoreContainerRef.current) return
+
+      const t = playerRef.current.getCurrentTime()
+      const tempoBpm = scoreTimeline.tempoBpm
+      
+      // Konvertera wall-clock time → musical time (whole note fractions)
+      // BPM = beats per minute, 1 beat = 1/4 whole note
+      let musicalTime = (t * tempoBpm) / 240
+      
+      // Clampa musical time
+      const maxMusicalTime = cursorStepsRef.current[cursorStepsRef.current.length - 1]?.musicalTime || 0
+      musicalTime = Math.max(0, Math.min(musicalTime, maxMusicalTime))
+
+      // Hitta närmaste cursor step baserat på musical time
+      let targetStep = 0
+      for (let i = 0; i < cursorStepsRef.current.length; i++) {
+        if (cursorStepsRef.current[i].musicalTime <= musicalTime) {
+          targetStep = cursorStepsRef.current[i].step
+        } else {
+          break
+        }
+      }
+
+      // Flytta cursor endast om steget ändrats
+      if (targetStep !== lastStep) {
+        osmdRef.current.cursor.reset()
+        
+        // Flytta cursor till rätt position
+        for (let i = 0; i < targetStep; i++) {
+          if (osmdRef.current.cursor.Iterator.EndReached) break
+          osmdRef.current.cursor.next()
+        }
+        
+        osmdRef.current.cursor.update()
+        lastStep = targetStep
+      }
+
+      // Synka overlay-linje med OSMD cursor
+      const cursorElement = osmdRef.current.cursor.cursorElement
+      if (cursorElement) {
+        const cursorRect = cursorElement.getBoundingClientRect()
+        const containerRect = scoreContainerRef.current.getBoundingClientRect()
+
+        playheadRef.current.style.left = `${cursorRect.left - containerRect.left + scoreContainerRef.current.scrollLeft}px`
+        playheadRef.current.style.top = `${cursorRect.top - containerRect.top + scoreContainerRef.current.scrollTop}px`
+        playheadRef.current.style.height = `${cursorRect.height}px`
+
+        // Auto-scroll
+        if (playerRef.current.isPlaying() && cursorRect.bottom > containerRect.bottom - 80) {
+          cursorElement.scrollIntoView({
+            behavior: 'smooth',
+            block: 'center'
+          })
+        }
+      }
+    }
+
+    function update() {
+      if (!playerRef.current || !osmdRef.current) {
+        raf = requestAnimationFrame(update)
+        return
+      }
+
+      if (playerRef.current.isPlaying()) {
+        updateCursorPosition()
+      }
+
+      raf = requestAnimationFrame(update)
+    }
+
+    raf = requestAnimationFrame(update)
+
+    return () => cancelAnimationFrame(raf)
+  }, [scoreTimeline])
+
   const handlePlay = () => {
-    if (!playerRef.current) return
+    if (!playerRef.current || !osmdRef.current) return
     
     if (isPlaying) {
       playerRef.current.pause()
     } else {
+      // Reset cursor vid start från början
+      if (playerRef.current.getCurrentTime() === 0) {
+        osmdRef.current.cursor.reset()
+        osmdRef.current.cursor.update()
+      }
       playerRef.current.play()
     }
   }
 
   const handleStop = () => {
-    if (!playerRef.current) return
+    if (!playerRef.current || !osmdRef.current) return
     playerRef.current.stop()
+    osmdRef.current.cursor.reset()
+    osmdRef.current.cursor.update()
   }
 
   const handleSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
     const time = parseFloat(event.target.value)
     setCurrentTime(time)
-    if (playerRef.current) {
+    if (playerRef.current && osmdRef.current) {
       playerRef.current.seekTo(time)
+      // Cursor uppdateras i animation loop
     }
   }
 
@@ -221,6 +339,7 @@ function ScorePlayerPage() {
             className="score-container"
           >
             {!osmdRef.current && <p>Välj en MusicXML- eller MXL-fil för att visa noter</p>}
+            {scoreTimeline && <div ref={playheadRef} className="playhead-marker" />}
           </div>
           
           {scoreTimeline && (

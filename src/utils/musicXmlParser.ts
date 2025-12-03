@@ -4,114 +4,91 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
   const parser = new DOMParser();
   const xmlDoc = parser.parseFromString(xml, "application/xml");
 
-  // Hitta tempo från första <sound tempo="...">
   const soundElement = xmlDoc.querySelector('sound[tempo]');
   const tempoBpm = soundElement ? parseInt(soundElement.getAttribute('tempo') || '120') : 120;
-
-  // Bygg part-id till voice-mapping
+  
   const partToVoiceMap = buildPartToVoiceMapping(xmlDoc);
-
   const notes: NoteEvent[] = [];
   let noteIdCounter = 0;
   const partDurations: number[] = [];
 
-  // Iterera genom alla parts
   const parts = xmlDoc.querySelectorAll('part');
   
   for (const part of parts) {
     const partId = part.getAttribute('id') || '';
     const voice = partToVoiceMap[partId] || partId;
     
-    // Absolut tid från styckets början för varje voice
-    const absoluteTimeBeatsByVoice = new Map<string, number>();
+    // Per-voice tidsräknare - varje voice har egen oberoende tidslinje
+    const currentTimeBeatsByVoice = new Map<string, number>();
     const prevStartBeatsByVoice = new Map<string, number>();
     let currentDivisions = 1;
+    let measureStartBeats = 0;
 
-    // Iterera genom measures i denna part
     const measures = part.querySelectorAll('measure');
-    let measureStartTimeBeats = 0; // Absolut tid för taktens början
     
     for (const measure of measures) {
-      // Uppdatera divisions om det finns
       const divisionsElement = measure.querySelector('attributes divisions');
       if (divisionsElement) {
         currentDivisions = parseInt(divisionsElement.textContent || '1');
       }
 
-      // Spara measure start-tid för varje voice
-      const measureStartByVoice = new Map<string, number>();
-      for (const [voiceKey, time] of absoluteTimeBeatsByVoice) {
-        measureStartByVoice.set(voiceKey, time);
+      // Reset alla voices till taktens början
+      for (const voiceKey of currentTimeBeatsByVoice.keys()) {
+        currentTimeBeatsByVoice.set(voiceKey, measureStartBeats);
       }
 
-      // Cursor för aktuell position i takten (används för backup)
-      let measureCursorBeats = 0;
-      let maxMeasureCursor = 0; // Spåra längsta positionen i takten
-
-      // Iterera genom alla element i denna measure (noter och backup)
       const measureChildren = Array.from(measure.children);
       
       for (const element of measureChildren) {
-        if (element.tagName === 'backup') {
-          // Backa cursor med angiven duration
-          const backupDuration = parseInt(element.querySelector('duration')?.textContent || '0');
-          measureCursorBeats -= backupDuration / currentDivisions;
+        // Ignorera backup och forward - endast för XML-läsordning
+        if (element.tagName === 'backup' || element.tagName === 'forward') {
           continue;
         }
         
         if (element.tagName !== 'note') continue;
         
         const noteElement = element;
-        // Hämta xmlVoice (fallback "1" om saknas)
         const xmlVoice = noteElement.querySelector('voice')?.textContent || '1';
         const voiceKey = `${partId}-${xmlVoice}`;
         
-        // Initiera voice-specifika räknare om de inte finns
-        if (!absoluteTimeBeatsByVoice.has(voiceKey)) {
-          // Ny voice börjar vid taktens början (inte vid 0!)
-          absoluteTimeBeatsByVoice.set(voiceKey, measureStartTimeBeats);
-          prevStartBeatsByVoice.set(voiceKey, measureStartTimeBeats);
-          measureStartByVoice.set(voiceKey, measureStartTimeBeats);
+        // Initiera voice vid taktens början om den inte finns
+        if (!currentTimeBeatsByVoice.has(voiceKey)) {
+          currentTimeBeatsByVoice.set(voiceKey, measureStartBeats);
+          prevStartBeatsByVoice.set(voiceKey, measureStartBeats);
         }
 
-        // Hämta duration
         const duration = parseInt(noteElement.querySelector('duration')?.textContent || '0');
         const durationBeats = duration / currentDivisions;
 
-        // Skippa pauser men uppdatera timing
+        // Hantera pauser - flytta voice-tid framåt
         if (noteElement.querySelector('rest')) {
           if (!noteElement.querySelector('chord')) {
-            measureCursorBeats += durationBeats;
-            maxMeasureCursor = Math.max(maxMeasureCursor, measureCursorBeats);
+            const currentTime = currentTimeBeatsByVoice.get(voiceKey) || measureStartBeats;
+            currentTimeBeatsByVoice.set(voiceKey, currentTime + durationBeats);
           }
           continue;
         }
 
-        // Hantera chord - samma starttid som föregående not i samma voice
+        // Hantera chord - samma starttid som föregående not
         const isChord = noteElement.querySelector('chord') !== null;
         let startTimeBeats: number;
         
         if (isChord) {
-          // Använd samma starttid som föregående not i denna voice
-          startTimeBeats = prevStartBeatsByVoice.get(voiceKey) || 0;
+          startTimeBeats = prevStartBeatsByVoice.get(voiceKey) || measureStartBeats;
         } else {
-          // Använd measure start + cursor position
-          const measureStart = measureStartByVoice.get(voiceKey) || 0;
-          startTimeBeats = measureStart + measureCursorBeats;
+          startTimeBeats = currentTimeBeatsByVoice.get(voiceKey) || measureStartBeats;
           prevStartBeatsByVoice.set(voiceKey, startTimeBeats);
         }
         
-        // Konvertera till sekunder
         const startTimeSeconds = (startTimeBeats * 60) / tempoBpm;
         const durationSeconds = (durationBeats * 60) / tempoBpm;
 
-        // Hämta pitch och konvertera till MIDI
         const pitchElement = noteElement.querySelector('pitch');
         if (pitchElement) {
           const midiPitch = convertPitchToMidi(pitchElement);
           
           const noteEvent: NoteEvent = {
-            id: `${voice}-${noteIdCounter++}`,
+            id: `${voice}-${xmlVoice}-${noteIdCounter++}`,
             voice,
             startTimeSeconds,
             durationSeconds,
@@ -121,24 +98,17 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
           notes.push(noteEvent);
         }
 
-        // Uppdatera cursor (endast om det inte är en chord)
+        // Uppdatera voice-tid (endast om inte chord)
         if (!isChord) {
-          measureCursorBeats += durationBeats;
-          maxMeasureCursor = Math.max(maxMeasureCursor, measureCursorBeats);
+          const currentTime = currentTimeBeatsByVoice.get(voiceKey) || measureStartBeats;
+          currentTimeBeatsByVoice.set(voiceKey, currentTime + durationBeats);
         }
       }
       
-      // Efter varje measure, uppdatera absolut tid för alla voices till längsta positionen
-      for (const voiceKey of absoluteTimeBeatsByVoice.keys()) {
-        const measureStart = measureStartByVoice.get(voiceKey) || 0;
-        absoluteTimeBeatsByVoice.set(voiceKey, measureStart + maxMeasureCursor);
-      }
-      
-      // Uppdatera measure start-tid för nästa takt
-      measureStartTimeBeats += maxMeasureCursor;
+      // Nästa takt börjar efter denna takts längd (3 beats i 3/4-takt)
+      measureStartBeats += 3; // 3/4 takt
     }
     
-    // Beräkna duration för denna part
     const partNotes = notes.filter(note => note.voice === voice);
     const partDuration = partNotes.reduce((max, note) => 
       Math.max(max, note.startTimeSeconds + note.durationSeconds), 0
@@ -146,7 +116,6 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
     partDurations.push(partDuration);
   }
 
-  // Total duration är max av alla part-durationer
   const totalDurationSeconds = Math.max(...partDurations, 0);
 
   return {
@@ -176,6 +145,8 @@ function buildPartToVoiceMapping(xmlDoc: Document): Record<string, VoiceId> {
       voice = 'Tenor';
     } else if (partName.includes('bas') || partName.includes('bass')) {
       voice = 'Bass';
+    } else if (partName.includes('keyboard') || partName.includes('piano') || partName.includes('rehearsal')) {
+      voice = 'Rehearsal keyboard';
     } else if (partNameElement?.textContent) {
       voice = partNameElement.textContent;
     }

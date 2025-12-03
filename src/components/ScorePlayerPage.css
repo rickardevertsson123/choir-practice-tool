@@ -73,11 +73,14 @@
 }
 
 .score-container {
+  position: relative;
   flex: 1;
   min-height: 400px;
+  max-height: 70vh;
   border: 2px dashed #ddd;
   border-radius: 4px;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .score-container:empty {
@@ -86,6 +89,15 @@
   justify-content: center;
   color: #666;
   font-style: italic;
+}
+
+.playhead-marker {
+  position: absolute;
+  width: 2px;
+  background: rgba(255, 0, 0, 0.8);
+  pointer-events: none;
+  z-index: 50;
+  box-shadow: 0 0 4px rgba(255, 0, 0, 0.5);
 }
 
 .control-panel {

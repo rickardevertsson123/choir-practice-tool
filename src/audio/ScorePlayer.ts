@@ -99,17 +99,34 @@ export class ScorePlayer implements PlayerControls {
     this.stopActiveOscillators();
 
     const offset = this.timelineStartOffset;
+    const tempoBpm = this.timeline.tempoBpm;
+    const secondsPerBeat = 60 / tempoBpm;
+    const measure7Start = (6 * 3) * secondsPerBeat; // takt 7 börjar vid beat 18
+    const measure7End = measure7Start + 3 * secondsPerBeat; // takt 7 slutar vid beat 21
 
     // Sortera noter i tidsordning
     const notesToPlay = this.timeline.notes
       .filter(note => note.startTimeSeconds + note.durationSeconds > offset)
       .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
 
-    // Debug: kolla keyboard
-    const keyboardNotes = notesToPlay
-      .filter(n => n.voice === "Rehearsal keyboard")
-      .slice(0, 10);
-    console.log("Scheduling Rehearsal keyboard (first 10):", keyboardNotes);
+    // Debug: kolla keyboard runt takt 7
+    const keyboardMeasure7 = this.timeline.notes
+      .filter(n => 
+        n.voice === "Rehearsal keyboard" &&
+        n.startTimeSeconds >= measure7Start - 0.1 &&
+        n.startTimeSeconds <= measure7End + 0.1
+      )
+      .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+    
+    console.log('\n🎹 SCHEDULER: Keyboard notes in measure 7 area:');
+    console.log('Measure 7 time range:', measure7Start.toFixed(2), '-', measure7End.toFixed(2), 's');
+    console.log('Beat 18 (rest):', measure7Start.toFixed(2), 's');
+    console.log('Beat 19:', (measure7Start + secondsPerBeat).toFixed(2), 's');
+    console.log('Beat 20:', (measure7Start + 2 * secondsPerBeat).toFixed(2), 's');
+    keyboardMeasure7.forEach(n => {
+      const beat = n.startTimeSeconds / secondsPerBeat;
+      console.log(`  🎵 MIDI ${n.midiPitch} @ ${n.startTimeSeconds.toFixed(2)}s (beat ${beat.toFixed(1)}) dur=${n.durationSeconds.toFixed(2)}s`);
+    });
 
     for (const note of notesToPlay) {
       const start = note.startTimeSeconds;
@@ -129,6 +146,13 @@ export class ScorePlayer implements PlayerControls {
       }
 
       const playAt = this.audioContext.currentTime + relativeStart;
+      
+      // Debug keyboard i takt 7
+      if (note.voice === "Rehearsal keyboard" && 
+          note.startTimeSeconds >= measure7Start - 0.1 && 
+          note.startTimeSeconds <= measure7End + 0.1) {
+        console.log(`  ▶️ SCHEDULING: MIDI ${note.midiPitch} at ${playAt.toFixed(2)}s (timeline ${note.startTimeSeconds.toFixed(2)}s)`);
+      }
 
       const osc = this.audioContext.createOscillator();
       osc.frequency.value = midiToFrequency(note.midiPitch);
