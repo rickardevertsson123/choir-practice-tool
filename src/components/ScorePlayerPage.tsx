@@ -172,7 +172,7 @@ function ScorePlayerPage() {
         playerRef.current.dispose()
       }
       try {
-        playerRef.current = new ScorePlayer(scoreTimeline)
+        playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata })
         
         // Initiera voice settings state
         const initialSettings: Record<VoiceId, VoiceMixerSettings> = {}
@@ -194,7 +194,7 @@ function ScorePlayerPage() {
         playerRef.current = null
       }
     }
-  }, [scoreTimeline])
+  }, [scoreTimeline, partMetadata])
 
   // Uppdatera currentTime när spelaren spelar
   useEffect(() => {
