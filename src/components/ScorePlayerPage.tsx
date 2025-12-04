@@ -42,6 +42,38 @@ function ScorePlayerPage() {
   const [isRefPlaying, setIsRefPlaying] = useState(false)
   const refOscillatorRef = useRef<OscillatorNode | null>(null)
   const refGainRef = useRef<GainNode | null>(null)
+  
+  // Voice matching state
+  interface VoiceMatch {
+    voiceId: VoiceId;
+    displayLabel: string;
+    targetMidi: number;
+    distanceCents: number;
+  }
+  const [voiceMatch, setVoiceMatch] = useState<VoiceMatch | null>(null)
+  
+  // Debug state
+  const [debugActiveNotes, setDebugActiveNotes] = useState(0)
+  const [debugActiveNotesByVoice, setDebugActiveNotesByVoice] = useState<Map<VoiceId, Array<{ noteName: string; midi: number }>>>(new Map())
+  const [debugMatchInfo, setDebugMatchInfo] = useState<{
+    bestVoice: VoiceId | null;
+    bestTargetMidi: number;
+    bestDistanceCents: number;
+    allDistances: Array<{ voice: VoiceId; targetMidi: number; distanceCents: number }>;
+  } | null>(null)
+  const [debugTimeInfo, setDebugTimeInfo] = useState<{
+    playbackTimeSeconds: number;
+    cursorWholeTime: number;
+    cursorMeasureIndex: number;
+  } | null>(null)
+  const [debugNoteIntervals, setDebugNoteIntervals] = useState<Array<{
+    voice: VoiceId;
+    displayLabel: string;
+    pitch: string;
+    startWhole: number;
+    endWhole: number;
+    isActive: boolean;
+  }>>([])
 
   // Initiera OSMD när komponenten mountas
   useEffect(() => {
@@ -420,6 +452,68 @@ function ScorePlayerPage() {
           const result = detectPitch(buffer, audioContextRef.current!.sampleRate)
           setPitchResult(result)
           
+          // Debug och voice matching KÖRS ALLTID under playback
+          // KRITISKT: Använder SAMMA tidskälla som playhead-loopen
+          const playerIsPlaying = playerRef.current?.isPlaying() || false;
+          
+          if (playerRef.current && playerIsPlaying) {
+            const timeline = playerRef.current['timeline'];
+            if (!timeline) return;
+            
+            // TIDSKÄLLA: player.getCurrentTime() = timelineStartOffset + (audioContext.currentTime - playStartTime)
+            const nowSeconds = playerRef.current.getCurrentTime();
+            const tempoBpm = timeline.tempoBpm;
+            
+            // Konvertera till musikalisk tid (samma formel som playhead-loopen)
+            const nowWhole = (nowSeconds * tempoBpm) / 240; // BPM = beats/min, 1 beat = 1/4 whole
+            
+            // Debug: Spara tidsinfo ALLTID
+            setDebugTimeInfo({
+              playbackTimeSeconds: nowSeconds,
+              cursorWholeTime: nowWhole,
+              cursorMeasureIndex: osmdRef.current?.cursor.Iterator.CurrentMeasureIndex || 0
+            });
+            
+            // Räkna aktiva noter
+            const activeNotes = timeline.notes.filter(note =>
+              nowWhole >= note.startWhole &&
+              nowWhole <= note.endWhole
+            );
+            
+            setDebugActiveNotes(activeNotes.length);
+            
+            // Debug: Hitta närmaste noter ALLTID (oavsett om aktiva eller ej)
+            const allNotesSorted = [...timeline.notes]
+              .sort((a, b) => Math.abs(a.startWhole - nowWhole) - Math.abs(b.startWhole - nowWhole))
+              .slice(0, 10);
+            
+            const noteIntervals = allNotesSorted.map(note => {
+              const isActive = nowWhole >= note.startWhole && nowWhole <= note.endWhole;
+              return {
+                voice: note.voice,
+                displayLabel: buildVoiceDisplayLabel(note.voice, getVoices(), partMetadata),
+                pitch: midiToNoteName(note.midiPitch),
+                startWhole: note.startWhole,
+                endWhole: note.endWhole,
+                isActive
+              };
+            });
+            setDebugNoteIntervals(noteIntervals);
+            
+            // Voice matching om vi har pitch
+            if (result.frequency) {
+              const noteInfo = frequencyToNoteInfo(result.frequency);
+              if (noteInfo) {
+                const match = findVoiceMatch(noteInfo.exactMidi);
+                setVoiceMatch(match);
+              } else {
+                setVoiceMatch(null);
+              }
+            }
+          } else {
+            setVoiceMatch(null);
+          }
+          
           animationFrameRef.current = requestAnimationFrame(detectLoop)
         }
         
@@ -484,6 +578,127 @@ function ScorePlayerPage() {
         }
       }, 2500);
     }
+  };
+  
+  // Hitta matchande stämma baserat på sungen pitch
+  const findVoiceMatch = (exactMidi: number): VoiceMatch | null => {
+    if (!playerRef.current) return null;
+    const timeline = playerRef.current['timeline'];
+    if (!timeline) return null;
+    
+    // TIDSKÄLLA: Samma som debug-loopen och playhead-loopen
+    const nowSeconds = playerRef.current.getCurrentTime();
+    const tempoBpm = timeline.tempoBpm;
+    const nowWhole = (nowSeconds * tempoBpm) / 240;
+
+    
+    // Hitta aktiva noter baserat på musikalisk tid
+    const activeNotes = timeline.notes.filter(note =>
+      nowWhole >= note.startWhole &&
+      nowWhole <= note.endWhole
+    );
+    
+    // Debug: Hitta närmaste noter (aktiva + inaktiva) för tidsanalys
+    const allNotesSorted = [...timeline.notes]
+      .sort((a, b) => Math.abs(a.startWhole - nowWhole) - Math.abs(b.startWhole - nowWhole))
+      .slice(0, 10); // Ta 10 närmaste
+    
+    const noteIntervals = allNotesSorted.map(note => {
+      const isActive = nowWhole >= note.startWhole && nowWhole <= note.endWhole;
+      return {
+        voice: note.voice,
+        displayLabel: buildVoiceDisplayLabel(note.voice, getVoices(), partMetadata),
+        pitch: midiToNoteName(note.midiPitch),
+        startWhole: note.startWhole,
+        endWhole: note.endWhole,
+        isActive
+      };
+    });
+    setDebugNoteIntervals(noteIntervals);
+    
+    // Debug: gruppera ALLA aktiva noter per voice (inkl. multipla noter)
+    const notesByVoice = new Map<VoiceId, Array<{ noteName: string; midi: number }>>();
+    for (const note of activeNotes) {
+      if (!notesByVoice.has(note.voice)) {
+        notesByVoice.set(note.voice, []);
+      }
+      notesByVoice.get(note.voice)!.push({
+        noteName: midiToNoteName(note.midiPitch),
+        midi: note.midiPitch
+      });
+    }
+    setDebugActiveNotesByVoice(notesByVoice);
+    
+    if (activeNotes.length === 0) {
+      setDebugMatchInfo(null);
+      return null;
+    }
+    
+    // Gruppera per voice och hitta närmaste not per voice (EXKLUDERA keyboard)
+    const voiceDistances = new Map<VoiceId, { targetMidi: number; distanceCents: number }>();
+    
+    for (const note of activeNotes) {
+      // Filtrera bort keyboard-voices
+      if (note.voice.toLowerCase().includes('keyboard')) continue;
+      
+      const distanceCents = (exactMidi - note.midiPitch) * 100;
+      const absDistance = Math.abs(distanceCents);
+      
+      const existing = voiceDistances.get(note.voice);
+      if (!existing || absDistance < Math.abs(existing.distanceCents)) {
+        voiceDistances.set(note.voice, {
+          targetMidi: note.midiPitch,
+          distanceCents: distanceCents
+        });
+      }
+    }
+    
+    // Om inga mänskliga voices finns, returnera null
+    if (voiceDistances.size === 0) {
+      setDebugMatchInfo(null);
+      return null;
+    }
+    
+    // Hitta voice med minsta avstånd (RANKING - ingen threshold)
+    let closestVoice: VoiceId | null = null;
+    let closestDistance = Infinity;
+    let closestTargetMidi = 0;
+    
+    for (const [voice, data] of voiceDistances) {
+      const absDistance = Math.abs(data.distanceCents);
+      if (absDistance < closestDistance) {
+        closestDistance = absDistance;
+        closestVoice = voice;
+        closestTargetMidi = data.targetMidi;
+      }
+    }
+    
+    // Debug: spara alla distances
+    const allDistances = Array.from(voiceDistances.entries()).map(([voice, data]) => ({
+      voice,
+      targetMidi: data.targetMidi,
+      distanceCents: data.distanceCents
+    }));
+    
+    setDebugMatchInfo({
+      bestVoice: closestVoice,
+      bestTargetMidi: closestTargetMidi,
+      bestDistanceCents: closestVoice ? voiceDistances.get(closestVoice)!.distanceCents : 0,
+      allDistances
+    });
+    
+    // ALLTID returnera bästa match (ingen threshold för identifiering)
+    if (closestVoice) {
+      const displayLabel = buildVoiceDisplayLabel(closestVoice, getVoices(), partMetadata);
+      return {
+        voiceId: closestVoice,
+        displayLabel,
+        targetMidi: closestTargetMidi,
+        distanceCents: voiceDistances.get(closestVoice)!.distanceCents
+      };
+    }
+    
+    return null;
   };
   
   // Cleanup vid unmount
@@ -587,6 +802,169 @@ function ScorePlayerPage() {
             </button>
           </div>
           
+          {/* Voice Matching - visas endast när playback är aktiv */}
+          {micActive && isPlaying && scoreTimeline && (
+            <div className="voice-matching">
+              <h4>🎵 Stämma-identifikation</h4>
+              {voiceMatch ? (
+                <div className="voice-match-display">
+                  <div className="matched-voice">
+                    Sjunger stämma: <strong>{voiceMatch.displayLabel}</strong> ✅
+                  </div>
+                  <div className="target-note">
+                    Målnot: {midiToNoteName(voiceMatch.targetMidi)}
+                  </div>
+                  <div className="voice-cents" style={{
+                    color: Math.abs(voiceMatch.distanceCents) < 10 ? 'green' : 
+                           Math.abs(voiceMatch.distanceCents) < 25 ? 'orange' : 'red'
+                  }}>
+                    Avvikelse: {voiceMatch.distanceCents > 0 ? '+' : ''}{Math.round(voiceMatch.distanceCents)} cent
+                  </div>
+                </div>
+              ) : (
+                <div className="no-voice-match">
+                  {pitchResult.frequency ? 'Ingen tydlig stämma' : 'Väntar på sång...'}
+                </div>
+              )}
+            </div>
+          )}
+          
+          {/* DEBUG PANEL */}
+          {micActive && (
+            <div className="debug-panel">
+              <h4>🔍 DEBUG - TIDSBAS</h4>
+              
+              <div className="debug-info">
+                {/* Tidspositioner */}
+                {debugTimeInfo ? (
+                  <div className="debug-section">
+                    <div className="debug-row"><strong>AKTUELL POSITION:</strong></div>
+                    <div className="debug-row debug-indent">
+                      PlaybackTimeSeconds = {debugTimeInfo.playbackTimeSeconds.toFixed(3)}
+                    </div>
+                    <div className="debug-row debug-indent">
+                      CursorWholeTime = {debugTimeInfo.cursorWholeTime.toFixed(3)}
+                    </div>
+                    <div className="debug-row debug-indent">
+                      CursorMeasure = {debugTimeInfo.cursorMeasureIndex}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="debug-section">
+                    <div className="debug-row"><strong>AKTUELL POSITION:</strong></div>
+                    <div className="debug-row debug-indent" style={{ color: 'red' }}>
+                      debugTimeInfo = NULL (cursor timestamp saknas?)
+                    </div>
+                  </div>
+                )}
+                
+                <div className="debug-row">
+                  <strong>Active notes count:</strong> {debugActiveNotes}
+                </div>
+                
+                {/* Aktiva noter per voice */}
+                {debugActiveNotesByVoice.size > 0 && (
+                  <div className="debug-section">
+                    <div className="debug-row"><strong>ACTIVE NOTES:</strong></div>
+                    {Array.from(debugActiveNotesByVoice.entries()).map(([voice, notes]) => {
+                      const displayLabel = buildVoiceDisplayLabel(voice, getVoices(), partMetadata);
+                      return (
+                        <div key={voice} className="debug-voice-block">
+                          <div className="debug-row debug-indent">
+                            <strong>VOICE: {displayLabel}</strong>
+                          </div>
+                          {notes.map((note, idx) => (
+                            <div key={idx} className="debug-row debug-indent2">
+                              Note: {note.noteName} (MIDI: {note.midi})
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                
+                {/* Pitch info */}
+                {pitchResult.frequency && (() => {
+                  const noteInfo = frequencyToNoteInfo(pitchResult.frequency);
+                  if (noteInfo) {
+                    return (
+                      <div className="debug-section">
+                        <div className="debug-row"><strong>SUNG PITCH:</strong></div>
+                        <div className="debug-row debug-indent">
+                          Sung note = {noteInfo.noteName}
+                        </div>
+                        <div className="debug-row debug-indent">
+                          ExactMidi = {noteInfo.exactMidi.toFixed(2)}
+                        </div>
+                        <div className="debug-row debug-indent">
+                          Cents = {noteInfo.centsOff > 0 ? '+' : ''}{noteInfo.centsOff.toFixed(0)}
+                        </div>
+                      </div>
+                    );
+                  }
+                  return null;
+                })()}
+                
+                {/* Noter med tidsintervall */}
+                {debugNoteIntervals.length > 0 && debugTimeInfo && (
+                  <div className="debug-section">
+                    <div className="debug-row"><strong>NOTER MED TIDSINTERVALL:</strong></div>
+                    <div className="debug-row debug-indent" style={{ fontSize: '0.75rem', color: '#999' }}>
+                      (cursorNow = {debugTimeInfo.cursorWholeTime.toFixed(3)})
+                    </div>
+                    {debugNoteIntervals.map((note, idx) => (
+                      <div key={idx} className="debug-voice-block" style={{
+                        backgroundColor: note.isActive ? '#d4edda' : '#fff5f5',
+                        borderLeftColor: note.isActive ? '#28a745' : '#ff6b6b'
+                      }}>
+                        <div className="debug-row debug-indent">
+                          <strong>VOICE: {note.displayLabel}</strong>
+                        </div>
+                        <div className="debug-row debug-indent2">
+                          Pitch: {note.pitch}
+                        </div>
+                        <div className="debug-row debug-indent2">
+                          startWhole = {note.startWhole.toFixed(3)}
+                        </div>
+                        <div className="debug-row debug-indent2">
+                          endWhole = {note.endWhole.toFixed(3)}
+                        </div>
+                        <div className="debug-row debug-indent2">
+                          <strong>ACTIVE = {note.isActive ? 'TRUE ✅' : 'FALSE ❌'}</strong>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                
+                {/* Match debug */}
+                {isPlaying && pitchResult.frequency && (
+                  <div className="debug-section">
+                    <div className="debug-row"><strong>MATCH RESULT:</strong></div>
+                    {debugMatchInfo ? (
+                      <>
+                        <div className="debug-row debug-indent">
+                          ClosestVoice = {debugMatchInfo.bestVoice ? buildVoiceDisplayLabel(debugMatchInfo.bestVoice, getVoices(), partMetadata) : 'null'}
+                        </div>
+                        <div className="debug-row debug-indent">
+                          TargetPitch = {debugMatchInfo.bestTargetMidi ? midiToNoteName(debugMatchInfo.bestTargetMidi) : 'N/A'}
+                        </div>
+                        <div className="debug-row debug-indent">
+                          DistanceCents = {debugMatchInfo.bestDistanceCents.toFixed(1)}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="debug-row debug-indent">
+                        MATCH = null
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          
           {/* Pitch Detection / Tuner */}
           <div className="pitch-detector">
             <h4>Tuner</h4>
@@ -594,7 +972,7 @@ function ScorePlayerPage() {
               {micActive ? 'Stoppa mikrofon' : 'Aktivera mikrofon'}
             </button>
             
-            {micActive && (
+            {micActive && !isPlaying && (
               <div className="pitch-display">
                 {pitchResult.frequency ? (
                   <>

@@ -292,6 +292,60 @@
   background-color: #c82333;
 }
 
+/* Voice Matching */
+.voice-matching {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: #d4edda;
+  border-radius: 6px;
+  border: 2px solid #28a745;
+}
+
+.voice-matching h4 {
+  margin: 0 0 0.75rem 0;
+  color: #155724;
+  font-size: 1rem;
+}
+
+.voice-match-display {
+  background-color: white;
+  padding: 1rem;
+  border-radius: 4px;
+  border: 1px solid #c3e6cb;
+}
+
+.matched-voice {
+  font-size: 1.3rem;
+  font-weight: 700;
+  color: #155724;
+  margin-bottom: 0.5rem;
+}
+
+.matched-voice strong {
+  color: #28a745;
+}
+
+.target-note {
+  font-size: 1.1rem;
+  color: #666;
+  margin: 0.5rem 0;
+}
+
+.voice-cents {
+  font-size: 1.2rem;
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+.no-voice-match {
+  color: #856404;
+  font-style: italic;
+  text-align: center;
+  padding: 1rem;
+  background-color: #fff3cd;
+  border-radius: 4px;
+}
+
 /* Reference Tone Trainer */
 .reference-tone {
   margin-bottom: 1.5rem;
@@ -437,4 +491,66 @@
   font-style: italic;
   text-align: center;
   padding: 1rem;
+}
+
+/* Debug Panel */
+.debug-panel {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: #fff;
+  border-radius: 6px;
+  border: 2px solid #ff6b6b;
+  box-shadow: 0 2px 4px rgba(255, 107, 107, 0.2);
+}
+
+.debug-panel h4 {
+  margin: 0 0 0.75rem 0;
+  color: #c92a2a;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.debug-info {
+  font-family: 'Courier New', monospace;
+  font-size: 0.9rem;
+}
+
+.debug-row {
+  padding: 0.4rem 0;
+  border-bottom: 1px solid #ffe0e0;
+}
+
+.debug-row:last-child {
+  border-bottom: none;
+}
+
+.debug-row strong {
+  color: #c92a2a;
+  display: inline-block;
+  min-width: 140px;
+}
+
+.debug-section {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 2px solid #ffe0e0;
+}
+
+.debug-indent {
+  padding-left: 1rem;
+  font-size: 0.85rem;
+}
+
+.debug-indent2 {
+  padding-left: 2rem;
+  font-size: 0.8rem;
+  color: #666;
+}
+
+.debug-voice-block {
+  margin: 0.5rem 0;
+  padding: 0.5rem;
+  background-color: #fff5f5;
+  border-left: 3px solid #ff6b6b;
+  border-radius: 3px;
 }

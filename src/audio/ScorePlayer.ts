@@ -375,7 +375,7 @@ export class ScorePlayer implements PlayerControls {
   getCurrentTime(): number {
     if (this.isPlayingState) {
       const elapsed = this.audioContext.currentTime - this.playStartTime;
-      return this.timelineStartOffset + elapsed;
+      this.currentTimeSeconds = this.timelineStartOffset + elapsed;
     }
     return this.currentTimeSeconds;
   }

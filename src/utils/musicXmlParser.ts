@@ -111,6 +111,11 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
         
         const startTimeSeconds = (startTimeBeats * 60) / tempoBpm;
         const durationSeconds = (durationBeats * 60) / tempoBpm;
+        
+        // Musikalisk tid i whole notes (1 beat = 1/4 whole note)
+        const startWhole = startTimeBeats / 4;
+        const durationWhole = durationBeats / 4;
+        const endWhole = startWhole + durationWhole;
 
         const pitchElement = noteElement.querySelector('pitch');
         if (pitchElement) {
@@ -125,7 +130,9 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
             voice: voiceId,
             startTimeSeconds,
             durationSeconds,
-            midiPitch
+            midiPitch,
+            startWhole,
+            endWhole
           };
           
           notes.push(noteEvent);
