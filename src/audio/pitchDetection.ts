@@ -6,6 +6,10 @@ export interface PitchResult {
   clarity: number;          // 0-1, confidence of detection
 }
 
+export interface TargetHint {
+  targetMidi: number;  // Expected MIDI note
+}
+
 export interface NoteInfo {
   noteName: string;   // e.g. "A4"
   midi: number;       // e.g. 69 (rounded)
@@ -18,19 +22,34 @@ const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 
 /**
  * Detect pitch using autocorrelation method
  * Optimized for human voice range (80-1000 Hz)
+ * Can use target hint for improved accuracy
  */
 export function detectPitch(
   buffer: Float32Array,
-  sampleRate: number
+  sampleRate: number,
+  targetHint?: TargetHint
 ): PitchResult {
   // Check if signal has enough energy
   const rms = Math.sqrt(buffer.reduce((sum, val) => sum + val * val, 0) / buffer.length);
+  
   if (rms < 0.01) {
     return { frequency: null, clarity: 0 };
   }
 
-  const minFreq = 80;   // Lowest human voice
-  const maxFreq = 1000; // Highest we care about
+  // TARGET-AWARE: Use target hint to constrain search range
+  let minFreq = 80;   // Default: Lowest human voice (bass E2)
+  let maxFreq = 1000; // Default: Extended range
+  let targetFreq: number | null = null;
+  
+  if (targetHint) {
+    // Convert target MIDI to frequency
+    targetFreq = 440 * Math.pow(2, (targetHint.targetMidi - 69) / 12);
+    
+    // Search ±1 octave around target
+    minFreq = targetFreq / 2;
+    maxFreq = targetFreq * 2;
+  }
+  
   const minPeriod = Math.floor(sampleRate / maxFreq);
   const maxPeriod = Math.floor(sampleRate / minFreq);
 
@@ -77,13 +96,63 @@ export function detectPitch(
     return { frequency: null, clarity };
   }
 
-  const frequency = sampleRate / bestPeriod;
+  let frequency = sampleRate / bestPeriod;
+  
+  // TARGET-AWARE: If we have a target, find best candidate near it
+  if (targetHint && targetFreq) {
+    // Collect all significant peaks (>70% of best)
+    const candidates: Array<{ freq: number; clarity: number; distance: number }> = [];
+    const clarityThreshold = clarity * 0.7;
+    
+    for (let i = 0; i < correlations.length; i++) {
+      const corr = correlations[i];
+      const peakClarity = sumSquares > 0 ? corr / sumSquares : 0;
+      
+      if (peakClarity >= clarityThreshold) {
+        const period = minPeriod + i;
+        const freq = sampleRate / period;
+        
+        // Calculate distance to target in log space (octave-independent)
+        const distance = Math.abs(Math.log2(freq / targetFreq));
+        
+        candidates.push({ freq, clarity: peakClarity, distance });
+      }
+    }
+    
+    // Sort by distance to target
+    candidates.sort((a, b) => a.distance - b.distance);
+    
+    if (candidates.length > 0) {
+      frequency = candidates[0].freq;
+    }
+  } else {
+    // FALLBACK: SUBHARMONIC CHECK for blind detection
+    // Look for strong correlation at 2x period (half frequency)
+    const doublePeriod = bestPeriod * 2;
+    if (doublePeriod <= maxPeriod) {
+      const idx = Math.round(doublePeriod - minPeriod);
+      if (idx >= 0 && idx < correlations.length) {
+        const subharmonicCorr = correlations[idx];
+        const subharmonicClarity = sumSquares > 0 ? subharmonicCorr / sumSquares : 0;
+        
+        // If subharmonic has strong correlation (within 80% of main peak), use it
+        if (subharmonicClarity > clarity * 0.8) {
+          const subFreq = sampleRate / doublePeriod;
+          
+          // Use subharmonic if it's in valid range
+          if (subFreq >= 80 && subFreq <= 500) {
+            frequency = subFreq;
+          }
+        }
+      }
+    }
+  }
   
   // Sanity check frequency range
-  if (frequency < minFreq || frequency > maxFreq) {
+  if (frequency < 80 || frequency > 1000) {
     return { frequency: null, clarity: 0 };
   }
-
+  
   return { frequency, clarity };
 }
 

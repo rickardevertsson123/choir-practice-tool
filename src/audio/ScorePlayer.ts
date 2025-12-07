@@ -1,4 +1,4 @@
-import { ScoreTimeline, NoteEvent, VoiceId, PartMetadata } from '../types/ScoreTimeline';
+import { ScoreTimeline, NoteEvent, VoiceId } from '../types/ScoreTimeline';
 
 export interface VoiceMixerSettings {
   volume: number;  // 0.0–1.0
@@ -8,7 +8,6 @@ export interface VoiceMixerSettings {
 
 export interface ScorePlayerOptions {
   audioContext?: AudioContext;
-  partMetadata?: PartMetadata[];
 }
 
 export interface PlayerControls {
@@ -23,56 +22,38 @@ export interface PlayerControls {
   getCurrentTime(): number;
   getDuration(): number;
   isPlaying(): boolean;
+  
+  setTempoMultiplier(multiplier: number): void;
+  getTempoMultiplier(): number;
 }
 
 export function midiToFrequency(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
-
-// Klassificerar om en voice är vocal (körstämma) eller instrument
-function isVocalVoice(voiceId: VoiceId, partMetadata: PartMetadata[]): boolean {
-  // Extrahera partId från voiceId (format: "P1-v1")
-  const partId = voiceId.split('-')[0];
-  const partName = partMetadata.find(p => p.partId === partId)?.partName || '';
-  
-  const searchText = (partName + ' ' + voiceId).toLowerCase();
-  const vocalKeywords = ["soprano", "sopran", "alto", "alt", "tenor", "bass", "choir", "chorus", "chor", "voice", "vocal", "satb"];
-  return vocalKeywords.some(k => searchText.includes(k));
-}
-
+0
 export class ScorePlayer implements PlayerControls {
   private audioContext: AudioContext;
   private timeline: ScoreTimeline;
   private voiceGains = new Map<VoiceId, GainNode>();
   private voiceSettings = new Map<VoiceId, VoiceMixerSettings>();
   private masterGain: GainNode;
-  private partMetadata: PartMetadata[];
-  
-  // VOCAL LEGATO: Persistent oscillators per vocal voice för flytande körljud
-  // En oscillator per voice som lever genom hela uppspelningen, pitch glidas mellan toner
-  private vocalOscillators = new Map<VoiceId, OscillatorNode>();
-  private vocalEnvGains = new Map<VoiceId, GainNode>();
-  private vocalFormantF1 = new Map<VoiceId, BiquadFilterNode>();
-  private vocalFormantF2 = new Map<VoiceId, BiquadFilterNode>();
-  private vocalLFOs = new Map<VoiceId, OscillatorNode>();
   
   private isPlayingState = false;
   private currentTimeSeconds = 0; // "cursor" i timeline
   private playStartTime = 0; // audioContext.currentTime när aktuell playback startade
   private timelineStartOffset = 0; // timeline-positionen där aktuell playback startade
-  private activeNodes: AudioScheduledSourceNode[] = [];
+  private activeOscillators: OscillatorNode[] = [];
+  private tempoMultiplier = 1.0; // 1.0 = normalt tempo, 0.5 = halvt, 2.0 = dubbelt
 
   constructor(timeline: ScoreTimeline, options?: ScorePlayerOptions) {
     this.timeline = timeline;
-    this.partMetadata = options?.partMetadata || [];
     
     try {
       this.audioContext = options?.audioContext || new AudioContext();
       
-      // GAIN STAGING: Balanserade nivåer för vocal (med formant-dämpning) och instrument
-      // masterGain: 0.5, voiceGain: 0.6, vocal envelope: 1.2, instrument envelope: 0.09
+      // Skapa master gain med låg nivå för att undvika distorsion
       this.masterGain = this.audioContext.createGain();
-      this.masterGain.gain.value = 0.5;
+      this.masterGain.gain.value = 0.05; // Mycket låg master-nivå
       this.masterGain.connect(this.audioContext.destination);
       
       // Initiera voice gains och settings
@@ -88,22 +69,15 @@ export class ScorePlayer implements PlayerControls {
   private initializeVoices(): void {
     const voices = new Set(this.timeline.notes.map(note => note.voice));
     
-    console.log('\n🎤 VOICE CLASSIFICATION:');
     for (const voice of voices) {
-      const partId = voice.split('-')[0];
-      const partName = this.partMetadata.find(p => p.partId === partId)?.partName || '(unknown)';
-      const isVocal = isVocalVoice(voice, this.partMetadata);
-      console.log(`  ${isVocal ? '🎤 VOCAL' : '🎹 INSTRUMENT'}: "${voice}" (${partName})`);
-      
-      // Skapa gain node för denna voice med default 0.6 för headroom
+      // Skapa gain node för denna voice
       const gainNode = this.audioContext.createGain();
-      gainNode.gain.value = 0.6;
       gainNode.connect(this.masterGain);
       this.voiceGains.set(voice, gainNode);
       
-      // Initiera settings
+      // Initiera settings - nu kan vi använda högre värden eftersom master är låg
       this.voiceSettings.set(voice, {
-        volume: 1.0,
+        volume: 1.0,  // Full voice-volym inom låg master-nivå
         muted: false,
         solo: false
       });
@@ -135,6 +109,12 @@ export class ScorePlayer implements PlayerControls {
       .filter(note => note.startTimeSeconds + note.durationSeconds > offset)
       .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
 
+    // Debug: kolla keyboard
+    const keyboardNotes = notesToPlay
+      .filter(n => n.voice === "Rehearsal keyboard")
+      .slice(0, 10);
+    console.log("Scheduling Rehearsal keyboard (first 10):", keyboardNotes);
+
     for (const note of notesToPlay) {
       const start = note.startTimeSeconds;
       const end = note.startTimeSeconds + note.durationSeconds;
@@ -152,17 +132,23 @@ export class ScorePlayer implements PlayerControls {
         continue;
       }
 
-      const playAt = this.audioContext.currentTime + relativeStart;
+      // Applicera tempo multiplier
+      const playAt = this.audioContext.currentTime + (relativeStart / this.tempoMultiplier);
+      const adjustedDuration = duration / this.tempoMultiplier;
+
+      const osc = this.audioContext.createOscillator();
+      osc.frequency.value = midiToFrequency(note.midiPitch);
+      osc.type = "sine";
 
       const voiceGain = this.voiceGains.get(note.voice);
       if (voiceGain) {
-        // Vocal/instrument-split: olika ljudgenerering för körstämmor vs instrument
-        if (isVocalVoice(note.voice, this.partMetadata)) {
-          this.playVocalNoteLegato(note, playAt, duration, voiceGain);
-        } else {
-          this.playInstrumentNote(note, playAt, duration, voiceGain);
-        }
+        osc.connect(voiceGain);
       }
+
+      osc.start(playAt);
+      osc.stop(playAt + adjustedDuration);
+
+      this.activeOscillators.push(osc);
     }
   }
 
@@ -183,138 +169,15 @@ export class ScorePlayer implements PlayerControls {
     this.stopActiveOscillators();
   }
 
-  private playVocalNoteLegato(note: NoteEvent, startTime: number, duration: number, voiceGain: GainNode): void {
-    const freq = midiToFrequency(note.midiPitch);
-    const voice = note.voice;
-    
-    // Skapa persistent oscillator för denna voice om den inte finns
-    if (!this.vocalOscillators.has(voice)) {
-      const osc = this.audioContext.createOscillator();
-      osc.type = "sawtooth";
-      osc.frequency.value = freq;
-      
-      // FORMANT FILTERS: Enkel "AA"-vokal emulering för körklang
-      // Signal chain: Osc → F1 → F2 → Envelope → VoiceGain
-      const formantF1 = this.audioContext.createBiquadFilter();
-      formantF1.type = "bandpass";
-      formantF1.frequency.value = 700;  // F1 för "AA"
-      formantF1.Q.value = 3;  // Lägre Q för mindre dämpning
-      
-      const formantF2 = this.audioContext.createBiquadFilter();
-      formantF2.type = "bandpass";
-      formantF2.frequency.value = 1200; // F2 för "AA"
-      formantF2.Q.value = 3;  // Lägre Q för mindre dämpning
-      
-      const envGain = this.audioContext.createGain();
-      envGain.gain.value = 0;
-      
-      const lfo = this.audioContext.createOscillator();
-      lfo.frequency.value = 5.5;
-      const lfoGain = this.audioContext.createGain();
-      lfoGain.gain.value = 4;
-      
-      lfo.connect(lfoGain);
-      lfoGain.connect(osc.frequency);
-      
-      osc.connect(formantF1);
-      formantF1.connect(formantF2);
-      formantF2.connect(envGain);
-      envGain.connect(voiceGain);
-      
-      osc.start(this.audioContext.currentTime);
-      lfo.start(this.audioContext.currentTime);
-      
-      this.vocalOscillators.set(voice, osc);
-      this.vocalEnvGains.set(voice, envGain);
-      this.vocalFormantF1.set(voice, formantF1);
-      this.vocalFormantF2.set(voice, formantF2);
-      this.vocalLFOs.set(voice, lfo);
-    }
-    
-    // Använd befintlig oscillator och glida pitch
-    const osc = this.vocalOscillators.get(voice)!;
-    const envGain = this.vocalEnvGains.get(voice)!;
-    
-    // Pitch glide mellan toner för legato-effekt
-    osc.frequency.setTargetAtTime(freq, startTime, 0.02);
-    
-    // Envelope för artikulation - högre nivåer för att kompensera formant-dämpning
-    const peakLevel = 1.2;   // Högre peak för att kompensera bandpass-förlust
-    const sustainLevel = 0.9; // Högre sustain
-    const timeConstant = 0.04;
-    
-    // Attack
-    envGain.gain.setTargetAtTime(peakLevel, startTime, timeConstant);
-    
-    // Sustain
-    envGain.gain.setTargetAtTime(sustainLevel, startTime + 0.05, timeConstant);
-    
-    // Release med overlap
-    envGain.gain.setTargetAtTime(0, startTime + duration, timeConstant * 1.5);
-  }
-  
-  private playInstrumentNote(note: NoteEvent, startTime: number, duration: number, voiceGain: GainNode): void {
-    const freq = midiToFrequency(note.midiPitch);
-    
-    const osc = this.audioContext.createOscillator();
-    osc.frequency.value = freq;
-    osc.type = "triangle";
-    
-    // Envelope med låg peak (0.09) för instrument - stödljud till vocal
-    const envGain = this.audioContext.createGain();
-    envGain.gain.value = 0;
-    
-    const attack = 0.01;
-    const peakLevel = 0.09;  // 30% av tidigare nivå för diskret stöd
-    const release = 0.05;
-    
-    const now = startTime;
-    envGain.gain.setValueAtTime(0, now);
-    envGain.gain.linearRampToValueAtTime(peakLevel, now + attack);
-    envGain.gain.setValueAtTime(peakLevel, now + duration - release);
-    envGain.gain.linearRampToValueAtTime(0, now + duration);
-    
-    osc.connect(envGain);
-    envGain.connect(voiceGain);
-    
-    osc.start(now);
-    osc.stop(now + duration);
-    
-    this.activeNodes.push(osc);
-  }
-
   private stopActiveOscillators(): void {
-    // Stoppa instrument-oscillators
-    for (const node of this.activeNodes) {
-      try {
-        node.stop();
-      } catch (e) {
-        // Node kanske redan stoppats
-      }
-    }
-    this.activeNodes = [];
-    
-    // Stoppa vocal oscillators
-    for (const osc of this.vocalOscillators.values()) {
+    for (const osc of this.activeOscillators) {
       try {
         osc.stop();
       } catch (e) {
-        // Redan stoppad
+        // Oscillator kanske redan stoppats
       }
     }
-    for (const lfo of this.vocalLFOs.values()) {
-      try {
-        lfo.stop();
-      } catch (e) {
-        // Redan stoppad
-      }
-    }
-    
-    this.vocalOscillators.clear();
-    this.vocalEnvGains.clear();
-    this.vocalFormantF1.clear();
-    this.vocalFormantF2.clear();
-    this.vocalLFOs.clear();
+    this.activeOscillators = [];
   }
 
   seekTo(timeSeconds: number): void {
@@ -357,27 +220,46 @@ export class ScorePlayer implements PlayerControls {
       const settings = this.voiceSettings.get(voiceId);
       if (!settings) continue;
       
-      let targetVolume = 0;
+      let gain = 0;
       
       if (hasSolo) {
         // Om solo finns, bara solo-voices ska höras
-        targetVolume = settings.solo ? settings.volume : 0;
+        gain = settings.solo ? settings.volume : 0;
       } else {
         // Annars: muted ? 0 : volume
-        targetVolume = settings.muted ? 0 : settings.volume;
+        gain = settings.muted ? 0 : settings.volume;
       }
       
-      // Applicera target volume på base gain (0.6)
-      gainNode.gain.value = 0.6 * targetVolume;
+      gainNode.gain.value = gain;
     }
   }
 
   getCurrentTime(): number {
     if (this.isPlayingState) {
       const elapsed = this.audioContext.currentTime - this.playStartTime;
-      this.currentTimeSeconds = this.timelineStartOffset + elapsed;
+      return this.timelineStartOffset + (elapsed * this.tempoMultiplier);
     }
     return this.currentTimeSeconds;
+  }
+  
+  setTempoMultiplier(multiplier: number): void {
+    const wasPlaying = this.isPlayingState;
+    const currentTime = this.getCurrentTime();
+    
+    if (wasPlaying) {
+      this.pause();
+    }
+    
+    this.tempoMultiplier = Math.max(0.25, Math.min(2.0, multiplier));
+    this.currentTimeSeconds = currentTime;
+    
+    if (wasPlaying) {
+      this.play();
+    }
+  }
+  
+  getTempoMultiplier(): number {
+    return this.tempoMultiplier;
   }
 
   getDuration(): number {

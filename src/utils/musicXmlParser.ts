@@ -36,7 +36,9 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
 
   const parts = xmlDoc.querySelectorAll('part');
   
-  for (const part of parts) {
+  for (let partIndex = 0; partIndex < parts.length; partIndex++) {
+    const part = parts[partIndex];
+    const staffIndex = partIndex;
     const partId = part.getAttribute('id') || '';
     
     console.log(`🎵 Processing part ${partId}`);
@@ -48,6 +50,7 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
     let measureStartBeats = 0;
 
     const measures = part.querySelectorAll('measure');
+    let measureIndex = 0;
     
     for (const measure of measures) {
       const divisionsElement = measure.querySelector('attributes divisions');
@@ -125,6 +128,10 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
           // UI-labels baseras på part-name + antal voices per part
           const voiceId: VoiceId = `${partId}-v${xmlVoice}`;
           
+          // Generate stable noteId using integer tick
+          const tick = Math.round(startWhole * 480);
+          const noteId = `p${partIndex}-m${measureIndex}-s${staffIndex}-p${midiPitch}-t${tick}`;
+          
           const noteEvent: NoteEvent = {
             id: `${voiceId}-${noteIdCounter++}`,
             voice: voiceId,
@@ -132,7 +139,10 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
             durationSeconds,
             midiPitch,
             startWhole,
-            endWhole
+            endWhole,
+            noteId,
+            measureIndex,
+            staffIndex
           };
           
           notes.push(noteEvent);
@@ -154,6 +164,7 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
       
       const measureLengthBeats = maxVoiceTime - measureStartBeats;
       measureStartBeats = maxVoiceTime;
+      measureIndex++;
     }
     
     // Beräkna duration för alla voices i denna part
