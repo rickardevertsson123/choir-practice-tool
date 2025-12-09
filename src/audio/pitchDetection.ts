@@ -32,7 +32,7 @@ export function detectPitch(
   // Check if signal has enough energy
   const rms = Math.sqrt(buffer.reduce((sum, val) => sum + val * val, 0) / buffer.length);
   
-  if (rms < 0.01) {
+  if (rms < 0.005) {
     return { frequency: null, clarity: 0 };
   }
 
@@ -45,9 +45,10 @@ export function detectPitch(
     // Convert target MIDI to frequency
     targetFreq = 440 * Math.pow(2, (targetHint.targetMidi - 69) / 12);
     
-    // Search ±1 octave around target
-    minFreq = targetFreq / 2;
-    maxFreq = targetFreq * 2;
+    // Search ±3 semitones around target (narrow range for better lock-in)
+    // 3 semitones = 2^(3/12) ≈ 1.189
+    minFreq = targetFreq / 1.189;
+    maxFreq = targetFreq * 1.189;
   }
   
   const minPeriod = Math.floor(sampleRate / maxFreq);
@@ -92,7 +93,7 @@ export function detectPitch(
   const clarity = sumSquares > 0 ? bestCorrelation / sumSquares : 0;
 
   // Require minimum clarity threshold
-  if (clarity < 0.5 || bestPeriod === -1) {
+  if (clarity < 0.7 || bestPeriod === -1) {
     return { frequency: null, clarity };
   }
 

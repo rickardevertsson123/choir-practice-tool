@@ -91,6 +91,14 @@
   font-style: italic;
 }
 
+.trail-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 45;
+}
+
 .playhead-marker {
   position: absolute;
   width: 2px;
@@ -670,40 +678,4 @@
   border-radius: 3px;
 }
 
-/* Note coloring for pitch feedback - Current (pulsating) */
-.note-current-good path {
-  fill: #22c55e !important;
-  animation: pulse 0.8s ease-in-out infinite alternate;
-}
-
-.note-current-close path {
-  fill: #f59e0b !important;
-  animation: pulse 0.8s ease-in-out infinite alternate;
-}
-
-.note-current-bad path {
-  fill: #ef4444 !important;
-  animation: pulse 0.8s ease-in-out infinite alternate;
-}
-
-/* Note coloring for pitch feedback - Done (static) */
-.note-done-good path {
-  fill: #22c55e !important;
-}
-
-.note-done-close path {
-  fill: #f59e0b !important;
-}
-
-.note-done-bad path {
-  fill: #ef4444 !important;
-}
-
-@keyframes pulse {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0.7;
-  }
-}
+/* Trail segments are styled inline for performance */

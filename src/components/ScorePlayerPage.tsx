@@ -82,10 +82,11 @@ function ScorePlayerPage() {
     isActive: boolean;
   }>>([])
   
-  // Spara sjungna noter och deras färg
-  const sungNotesRef = useRef<Map<string, string>>(new Map()); // key: noteId, value: colorClass
-  const currentNoteRef = useRef<string | null>(null); // Aktuell not som sjungs
-  const noteToSvgMap = useRef<Map<string, SVGElement>>(new Map()); // Map noteId -> SVG element
+  // Färgspår för pitch accuracy (canvas)
+  const trailCanvasRef = useRef<HTMLCanvasElement>(null);
+  const trailCtxRef = useRef<CanvasRenderingContext2D | null>(null);
+  const lastTrailPositionRef = useRef<number>(-1);
+  const trailFrameCountRef = useRef<number>(0);
 
   // Initiera OSMD när komponenten mountas
   useEffect(() => {
@@ -155,11 +156,13 @@ function ScorePlayerPage() {
       setScoreTimeline(timeline)
       setCurrentTime(0)
       
-      // Bygg GraphicalNote -> SVG mapping efter en kort delay för att säkerställa rendering
+      // Rensa färgspår vid ny fil
+      clearTrail();
+      
+      // Bygg position-cache EN GÅNG vid fil-laddning
       setTimeout(() => {
-        console.log('\n>>> Calling buildNoteToSvgMap after 1s delay...');
-        buildNoteToSvgMap();
-      }, 1000)
+        buildPositionCache();
+      }, 100);
       
     } catch (err) {
       console.error('Fel vid laddning av fil:', err)
@@ -271,12 +274,25 @@ function ScorePlayerPage() {
 
   // Uppdatera currentTime när spelaren spelar
   useEffect(() => {
-    if (!playerRef.current) return
+    if (!playerRef.current || !scoreTimeline) return
 
     const updateTime = () => {
-      if (playerRef.current) {
-        setCurrentTime(playerRef.current.getCurrentTime())
+      if (playerRef.current && scoreTimeline) {
+        const currentTime = playerRef.current.getCurrentTime()
+        const duration = scoreTimeline.totalDurationSeconds
+        
+        setCurrentTime(currentTime)
         setIsPlaying(playerRef.current.isPlaying())
+        
+        // Auto-loop: Om vi nått slutet och spelar, starta om
+        if (playerRef.current.isPlaying() && currentTime >= duration - 0.1) {
+          playerRef.current.seekTo(0)
+          if (osmdRef.current) {
+            osmdRef.current.cursor.reset()
+            osmdRef.current.cursor.update()
+          }
+          clearTrail()
+        }
       }
     }
 
@@ -284,7 +300,43 @@ function ScorePlayerPage() {
     return () => clearInterval(interval)
   }, [scoreTimeline])
 
-  // Playhead animation loop med OSMD Cursor (musical-time baserad)
+  // Cache för cursor-positioner
+  const cursorPositionsRef = useRef<Array<{ step: number; left: number; top: number; height: number }>>([]);
+  
+  // Bygg position-cache (anropas EN GÅNG vid fil-laddning)
+  const buildPositionCache = () => {
+    if (!osmdRef.current || !scoreContainerRef.current || cursorStepsRef.current.length === 0) return;
+    
+    cursorPositionsRef.current = [];
+    osmdRef.current.cursor.reset();
+    
+    for (let i = 0; i < cursorStepsRef.current.length; i++) {
+      const cursorElement = osmdRef.current.cursor.cursorElement;
+      if (cursorElement) {
+        const cursorRect = cursorElement.getBoundingClientRect();
+        const containerRect = scoreContainerRef.current.getBoundingClientRect();
+        
+        cursorPositionsRef.current.push({
+          step: i,
+          left: cursorRect.left - containerRect.left + scoreContainerRef.current.scrollLeft,
+          top: cursorRect.top - containerRect.top + scoreContainerRef.current.scrollTop,
+          height: cursorRect.height
+        });
+      }
+      
+      if (!osmdRef.current.cursor.Iterator.EndReached) {
+        osmdRef.current.cursor.next();
+      }
+    }
+    
+    // Återställ cursor till början
+    osmdRef.current.cursor.reset();
+    osmdRef.current.cursor.update();
+    
+    console.log(`Position-cache byggd: ${cursorPositionsRef.current.length} positioner`);
+  };
+
+  // Playhead animation loop med OSMD Cursor (musical-time baserad + interpolation)
   useEffect(() => {
     if (!playerRef.current || !osmdRef.current || !playheadRef.current || !scoreTimeline) return
     if (cursorStepsRef.current.length === 0) return
@@ -306,17 +358,19 @@ function ScorePlayerPage() {
       const maxMusicalTime = cursorStepsRef.current[cursorStepsRef.current.length - 1]?.musicalTime || 0
       musicalTime = Math.max(0, Math.min(musicalTime, maxMusicalTime))
 
-      // Hitta närmaste cursor step baserat på musical time
-      let targetStep = 0
+      // Hitta nuvarande och nästa cursor step
+      let currentStepIndex = 0
       for (let i = 0; i < cursorStepsRef.current.length; i++) {
         if (cursorStepsRef.current[i].musicalTime <= musicalTime) {
-          targetStep = cursorStepsRef.current[i].step
+          currentStepIndex = i
         } else {
           break
         }
       }
+      
+      const targetStep = cursorStepsRef.current[currentStepIndex].step
 
-      // Flytta cursor endast om steget ändrats
+      // Flytta cursor endast om steget ändrats (för visuell feedback)
       if (targetStep !== lastStep) {
         osmdRef.current.cursor.reset()
         
@@ -330,22 +384,43 @@ function ScorePlayerPage() {
         lastStep = targetStep
       }
 
-      // Synka overlay-linje med OSMD cursor
-      const cursorElement = osmdRef.current.cursor.cursorElement
-      if (cursorElement) {
-        const cursorRect = cursorElement.getBoundingClientRect()
-        const containerRect = scoreContainerRef.current.getBoundingClientRect()
+      // Interpolera markörens position
+      const currentStep = cursorStepsRef.current[currentStepIndex];
+      const nextStep = cursorStepsRef.current[currentStepIndex + 1];
+      
+      if (currentStep && nextStep && cursorPositionsRef.current.length > currentStepIndex + 1) {
+        // Beräkna progress mellan steps (0.0 - 1.0)
+        const progress = (musicalTime - currentStep.musicalTime) / 
+                        (nextStep.musicalTime - currentStep.musicalTime);
+        
+        const currentPos = cursorPositionsRef.current[currentStepIndex];
+        const nextPos = cursorPositionsRef.current[currentStepIndex + 1];
+        
+        // Interpolera X-position
+        const interpolatedLeft = currentPos.left + (nextPos.left - currentPos.left) * progress;
+        
+        playheadRef.current.style.left = `${interpolatedLeft}px`;
+        playheadRef.current.style.top = `${currentPos.top}px`;
+        playheadRef.current.style.height = `${currentPos.height}px`;
+      } else if (cursorPositionsRef.current.length > currentStepIndex) {
+        // Fallback: använd exakt position
+        const pos = cursorPositionsRef.current[currentStepIndex];
+        playheadRef.current.style.left = `${pos.left}px`;
+        playheadRef.current.style.top = `${pos.top}px`;
+        playheadRef.current.style.height = `${pos.height}px`;
+      }
 
-        playheadRef.current.style.left = `${cursorRect.left - containerRect.left + scoreContainerRef.current.scrollLeft}px`
-        playheadRef.current.style.top = `${cursorRect.top - containerRect.top + scoreContainerRef.current.scrollTop}px`
-        playheadRef.current.style.height = `${cursorRect.height}px`
-
-        // Auto-scroll
-        if (playerRef.current.isPlaying() && cursorRect.bottom > containerRect.bottom - 80) {
+      // Auto-scroll
+      const cursorElement = osmdRef.current.cursor.cursorElement;
+      if (cursorElement && playerRef.current.isPlaying()) {
+        const cursorRect = cursorElement.getBoundingClientRect();
+        const containerRect = scoreContainerRef.current.getBoundingClientRect();
+        
+        if (cursorRect.bottom > containerRect.bottom - 80) {
           cursorElement.scrollIntoView({
             behavior: 'smooth',
             block: 'center'
-          })
+          });
         }
       }
     }
@@ -378,7 +453,13 @@ function ScorePlayerPage() {
       if (playerRef.current.getCurrentTime() === 0) {
         osmdRef.current.cursor.reset()
         osmdRef.current.cursor.update()
+        // Rensa allt när vi startar från början
+        clearTrail();
+      } else {
+        // Rensa färgspår till höger om markören när vi fortsätter
+        clearTrailAhead();
       }
+      
       playerRef.current.play()
     }
   }
@@ -388,7 +469,10 @@ function ScorePlayerPage() {
     playerRef.current.stop()
     osmdRef.current.cursor.reset()
     osmdRef.current.cursor.update()
-    clearNoteColors()
+    
+    // Reset pitch detection state
+    setPitchResult({ frequency: null, clarity: 0 })
+    setVoiceMatch(null)
   }
 
   const handleSeek = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -555,36 +639,17 @@ function ScorePlayerPage() {
                 const match = findVoiceMatch(noteInfo.exactMidi);
                 setVoiceMatch(match);
                 
-                // Färga noter i OSMD baserat på pitch accuracy
-                if (match) {
-                  const timeline = playerRef.current['timeline'];
-                  if (timeline) {
-                    const nowSeconds = playerRef.current.getCurrentTime();
-                    
-                    const activeNote = timeline.notes.find(note => 
-                      note.voice === match.voiceId &&
-                      note.midiPitch === match.targetMidi &&
-                      nowSeconds >= note.startTimeSeconds &&
-                      nowSeconds <= note.startTimeSeconds + note.durationSeconds
-                    );
-                    
-                    if (activeNote && activeNote.noteId) {
-                      colorNoteInScore(activeNote.noteId, Math.abs(match.distanceCents));
-                    }
-                  }
-                } else {
-                  clearNoteColors();
+                // Rita färgspår ENDAST när vi missar (orange/röd)
+                const absCents = Math.abs(match.distanceCents);
+                if (match && absCents >= 10 && trailFrameCountRef.current++ % 8 === 0) {
+                  drawTrailSegment(absCents);
                 }
               } else {
                 setVoiceMatch(null);
-                clearNoteColors();
               }
-            } else {
-              clearNoteColors();
             }
           } else {
             setVoiceMatch(null);
-            clearNoteColors();
           }
           
           animationFrameRef.current = requestAnimationFrame(detectLoop)
@@ -774,116 +839,61 @@ function ScorePlayerPage() {
     };
   };
   
-  // Bygg mapping från noteId till SVG element
-  const buildNoteToSvgMap = () => {
-    if (!osmdRef.current || !scoreContainerRef.current) {
-      return;
-    }
-    
-    noteToSvgMap.current.clear();
-    
-    try {
-      const graphic = osmdRef.current.graphic;
-      if (!graphic) {
-        return;
-      }
+  // Initiera canvas när score container ändras
+  useEffect(() => {
+    if (trailCanvasRef.current && scoreContainerRef.current) {
+      const canvas = trailCanvasRef.current;
+      const container = scoreContainerRef.current;
       
-      // Iterera genom alla MusicPages
-      for (const page of graphic.MusicPages) {
-        for (const system of page.MusicSystems) {
-          for (let staffIndex = 0; staffIndex < system.StaffLines.length; staffIndex++) {
-            const staffLine = system.StaffLines[staffIndex];
-            const partIndex = staffIndex;
-            
-            for (const measure of staffLine.Measures) {
-              const measureIndex = measure.MeasureNumber - 1;
-              
-              for (const staffEntry of measure.staffEntries) {
-                for (const voiceEntry of staffEntry.graphicalVoiceEntries) {
-                  for (const graphicalNote of voiceEntry.notes || []) {
-                    if (!graphicalNote.sourceNote) continue;
-                    
-                    const pitch = graphicalNote.sourceNote.Pitch;
-                    if (!pitch) continue;
-                    
-                    const midiPitch = pitch.getHalfTone();
-                    const relTime = staffEntry.relInMeasureTimestamp || 0;
-                    const absTime = measure.parentSourceMeasure.AbsoluteTimestamp?.RealValue || 0;
-                    const startWhole = relTime + absTime;
-                    const tick = Math.round(startWhole * 480);
-                    
-                    const noteId = `p${partIndex}-m${measureIndex}-s${staffIndex}-p${midiPitch}-t${tick}`;
-                    
-                    if (isNaN(tick)) {
-                      continue;
-                    }
-                    
-                    const svgElement = graphicalNote.getSVGGElement();
-                    if (svgElement) {
-                      noteToSvgMap.current.set(noteId, svgElement);
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    } catch (err) {
-      // Silent fail
+      // Sätt canvas storlek till container storlek
+      canvas.width = container.scrollWidth;
+      canvas.height = container.scrollHeight;
+      
+      // Få rendering context
+      trailCtxRef.current = canvas.getContext('2d');
     }
-  };
+  }, [scoreTimeline]);
   
-  // Färga not i OSMD baserat på pitch accuracy
-  const colorNoteInScore = (noteId: string, absCents: number) => {
-    // Bestäm färgklass baserat på cents
-    let colorClass = 'bad';
+  // Rita färgspår bakom markören
+  const drawTrailSegment = (absCents: number) => {
+    if (!playheadRef.current || !trailCtxRef.current) return;
+    
+    const playheadLeft = parseFloat(playheadRef.current.style.left || '0');
+    const playheadTop = parseFloat(playheadRef.current.style.top || '0');
+    const playheadHeight = parseFloat(playheadRef.current.style.height || '0');
+    
+    // Bestäm färg baserat på cents (mer transparent)
+    let color = 'rgba(239, 68, 68, 0.15)'; // Röd (bad)
     if (absCents < 10) {
-      colorClass = 'good';
+      color = 'rgba(34, 197, 94, 0.15)'; // Grön (good)
     } else if (absCents < 25) {
-      colorClass = 'close';
+      color = 'rgba(245, 158, 11, 0.15)'; // Orange (close)
     }
     
-    // Kolla om detta är en ny not
-    if (currentNoteRef.current !== noteId) {
-      // Föregående not är klar - flytta från current till done
-      if (currentNoteRef.current) {
-        const prevColor = sungNotesRef.current.get(currentNoteRef.current);
-        if (prevColor) {
-          const prevSvg = noteToSvgMap.current.get(currentNoteRef.current);
-          if (prevSvg) {
-            prevSvg.classList.remove('note-current-good', 'note-current-close', 'note-current-bad');
-            prevSvg.classList.add(`note-done-${prevColor}`);
-          }
-        }
-      }
-      currentNoteRef.current = noteId;
-    }
+    // Rita rektangel på canvas - tät sampling för kontinuerlig linje
+    const ctx = trailCtxRef.current;
+    ctx.fillStyle = color;
+    ctx.fillRect(playheadLeft, playheadTop, 6, playheadHeight);
     
-    // Uppdatera färgen för aktuell not
-    sungNotesRef.current.set(noteId, colorClass);
-    
-    // Applicera färg på aktuell not
-    const svgElement = noteToSvgMap.current.get(noteId);
-    if (svgElement) {
-      svgElement.classList.remove('note-current-good', 'note-current-close', 'note-current-bad');
-      svgElement.classList.add(`note-current-${colorClass}`);
-    }
+    lastTrailPositionRef.current = playheadLeft;
   };
   
-  // Inte längre behövd - färgning sker direkt i colorNoteInScore
+  // Rensa alla färgspår
+  const clearTrail = () => {
+    if (!trailCanvasRef.current || !trailCtxRef.current) return;
+    const canvas = trailCanvasRef.current;
+    trailCtxRef.current.clearRect(0, 0, canvas.width, canvas.height);
+    lastTrailPositionRef.current = -1;
+  };
   
-  const clearNoteColors = () => {
-    // Rensa alla färgklasser
-    if (scoreContainerRef.current) {
-      const colored = scoreContainerRef.current.querySelectorAll('[class*="note-current-"], [class*="note-done-"]');
-      colored.forEach(el => {
-        el.classList.remove('note-current-good', 'note-current-close', 'note-current-bad',
-                           'note-done-good', 'note-done-close', 'note-done-bad');
-      });
-    }
-    currentNoteRef.current = null;
-    sungNotesRef.current.clear();
+  // Rensa färgspår till höger om markören
+  const clearTrailAhead = () => {
+    if (!playheadRef.current || !trailCanvasRef.current || !trailCtxRef.current) return;
+    const currentLeft = parseFloat(playheadRef.current.style.left || '0');
+    const canvas = trailCanvasRef.current;
+    
+    // Rensa allt till höger om current position
+    trailCtxRef.current.clearRect(currentLeft, 0, canvas.width - currentLeft, canvas.height);
   };
   
   // Cleanup vid unmount
@@ -898,7 +908,7 @@ function ScorePlayerPage() {
       if (refOscillatorRef.current) {
         refOscillatorRef.current.stop();
       }
-      clearNoteColors();
+      clearTrail();
     }
   }, [])
 
@@ -931,7 +941,12 @@ function ScorePlayerPage() {
             className="score-container"
           >
             {!osmdRef.current && <p>Välj en MusicXML- eller MXL-fil för att visa noter</p>}
-            {scoreTimeline && <div ref={playheadRef} className="playhead-marker" />}
+            {scoreTimeline && (
+              <>
+                <canvas ref={trailCanvasRef} className="trail-canvas" />
+                <div ref={playheadRef} className="playhead-marker" />
+              </>
+            )}
           </div>
           
           {scoreTimeline && (
