@@ -37,12 +37,6 @@ function ScorePlayerPage() {
   const micStreamRef = useRef<MediaStream | null>(null)
   const animationFrameRef = useRef<number>(0)
   
-  // Reference tone state
-  const [referenceMidi, setReferenceMidi] = useState(69) // A4
-  const [isRefPlaying, setIsRefPlaying] = useState(false)
-  const refOscillatorRef = useRef<OscillatorNode | null>(null)
-  const refGainRef = useRef<GainNode | null>(null)
-  
   // Voice matching state
   interface VoiceMatch {
     voiceId: VoiceId;
@@ -584,7 +578,7 @@ function ScorePlayerPage() {
         const source = audioContextRef.current.createMediaStreamSource(stream)
         const analyser = audioContextRef.current.createAnalyser()
         analyser.fftSize = 4096
-        analyser.smoothingTimeConstant = 0.8
+        analyser.smoothingTimeConstant = 0.3
         
         source.connect(analyser)
         analyserRef.current = analyser
@@ -715,9 +709,9 @@ function ScorePlayerPage() {
                 
                 // Rita färgspår för fel eller paus
                 if (match) {
-                  // Normal matching - rita om off-pitch
+                  // Normal matching - rita endast om avvikelse >= 10 cent
                   const absCents = Math.abs(match.distanceCents);
-                  if (absCents >= 10 && trailFrameCountRef.current++ % 8 === 0) {
+                  if (absCents >= 10 && trailFrameCountRef.current++ % 2 === 0) {
                     drawTrailSegment(absCents);
                   }
                 } else {
@@ -727,9 +721,9 @@ function ScorePlayerPage() {
                     nowSeconds <= note.startTimeSeconds + note.durationSeconds
                   );
                   
-                  if (strictActiveNotes.length === 0 && trailFrameCountRef.current++ % 8 === 0) {
-                    // Sjunger under paus - rita röd
-                    drawTrailSegment(1000); // Högt värde = röd färg
+                  if (strictActiveNotes.length === 0 && trailFrameCountRef.current++ % 2 === 0) {
+                    // Sjunger under paus - rita orange
+                    drawTrailSegment(-1); // Negativt värde = paus (orange)
                   }
                 }
               } else {
@@ -754,63 +748,6 @@ function ScorePlayerPage() {
     }
   }
   
-  // Spela referenston
-  const playReferenceTone = () => {
-    if (isRefPlaying) {
-      // Stoppa ton
-      if (refOscillatorRef.current && refGainRef.current) {
-        const now = audioContextRef.current!.currentTime;
-        refGainRef.current.gain.setTargetAtTime(0, now, 0.05); // Fade out
-        setTimeout(() => {
-          refOscillatorRef.current?.stop();
-          refOscillatorRef.current = null;
-          refGainRef.current = null;
-        }, 200);
-      }
-      setIsRefPlaying(false);
-    } else {
-      // Starta ton
-      if (!audioContextRef.current) {
-        audioContextRef.current = new AudioContext();
-      }
-      
-      const osc = audioContextRef.current.createOscillator();
-      const gain = audioContextRef.current.createGain();
-      
-      osc.type = 'sine';
-      osc.frequency.value = midiToFrequency(referenceMidi);
-      
-      gain.gain.value = 0;
-      osc.connect(gain);
-      gain.connect(audioContextRef.current.destination);
-      
-      const now = audioContextRef.current.currentTime;
-      gain.gain.setTargetAtTime(0.3, now, 0.02); // Fade in
-      
-      osc.start(now);
-      
-      refOscillatorRef.current = osc;
-      refGainRef.current = gain;
-      setIsRefPlaying(true);
-      
-      // Auto-stop efter 2.5 sekunder
-      setTimeout(() => {
-        if (refGainRef.current && refOscillatorRef.current) {
-          const stopTime = audioContextRef.current!.currentTime;
-          refGainRef.current.gain.setTargetAtTime(0, stopTime, 0.05);
-          setTimeout(() => {
-            refOscillatorRef.current?.stop();
-            refOscillatorRef.current = null;
-            refGainRef.current = null;
-            setIsRefPlaying(false);
-          }, 200);
-        }
-      }, 2500);
-    }
-  };
-  
-
-
   // Hitta matchande stämma baserat på sungen pitch
   const findVoiceMatch = (exactMidi: number, voiceFilter?: VoiceId): VoiceMatch | null => {
     if (!playerRef.current) return null;
@@ -937,12 +874,16 @@ function ScorePlayerPage() {
     const playheadTop = parseFloat(playheadRef.current.style.top || '0');
     const playheadHeight = parseFloat(playheadRef.current.style.height || '0');
     
-    // Bestäm färg baserat på cents (mer transparent)
-    let color = 'rgba(239, 68, 68, 0.15)'; // Röd (bad)
-    if (absCents < 10) {
-      color = 'rgba(34, 197, 94, 0.15)'; // Grön (good)
-    } else if (absCents < 25) {
-      color = 'rgba(245, 158, 11, 0.15)'; // Orange (close)
+    let color: string;
+    
+    if (absCents < 0) {
+      // Paus (negativt värde) - orange med fast transparens
+      color = 'rgba(245, 158, 11, 0.6)';
+    } else {
+      // Normal avvikelse - röd med gradvis transparens
+      // 10 cent → 0.1, 50 cent → 0.6, > 50 cent → 0.6
+      const alpha = Math.min(0.6, 0.1 + (absCents - 10) * (0.5 / 40));
+      color = `rgba(239, 68, 68, ${alpha})`;
     }
     
     // Rita rektangel på canvas - tät sampling för kontinuerlig linje
@@ -979,9 +920,6 @@ function ScorePlayerPage() {
       }
       if (animationFrameRef.current) {
         clearTimeout(animationFrameRef.current)
-      }
-      if (refOscillatorRef.current) {
-        refOscillatorRef.current.stop();
       }
       clearTrail();
     }
@@ -1068,37 +1006,6 @@ function ScorePlayerPage() {
             </div>
           )}
           
-          {/* Reference Tone Trainer */}
-          <div className="reference-tone">
-            <h4>🔔 Referenston-träning</h4>
-            
-            <div className="reference-controls">
-              <button 
-                onClick={() => setReferenceMidi(Math.max(48, referenceMidi - 1))}
-                className="ref-adjust"
-              >
-                –
-              </button>
-              <div className="ref-note-display">
-                {midiToNoteName(referenceMidi)}
-              </div>
-              <button 
-                onClick={() => setReferenceMidi(Math.min(84, referenceMidi + 1))}
-                className="ref-adjust"
-              >
-                +
-              </button>
-            </div>
-            
-            <button 
-              onClick={playReferenceTone}
-              className="ref-play-button"
-              style={{ backgroundColor: isRefPlaying ? '#dc3545' : '#28a745' }}
-            >
-              {isRefPlaying ? 'Stoppa ton' : 'Spela referenston'}
-            </button>
-          </div>
-          
           {/* Voice Matching - visas när playback är aktiv */}
           {micActive && isPlaying && scoreTimeline && (
             <div className="voice-matching">
@@ -1164,22 +1071,16 @@ function ScorePlayerPage() {
                     {(() => {
                       const noteInfo = frequencyToNoteInfo(pitchResult.frequency)
                       if (noteInfo) {
-                        // Beräkna avvikelse relativt referenston
-                        const refCents = (noteInfo.midi - referenceMidi) * 100 + noteInfo.centsOff;
-                        
                         return (
                           <>
-                            <div className="pitch-target">
-                              Målton: {midiToNoteName(referenceMidi)}
-                            </div>
                             <div className="pitch-note">
-                              Din ton: {noteInfo.noteName}
+                              Not: {noteInfo.noteName}
                             </div>
                             <div className="pitch-cents" style={{
-                              color: Math.abs(refCents) < 10 ? 'green' : 
-                                     Math.abs(refCents) < 25 ? 'orange' : 'red'
+                              color: Math.abs(noteInfo.centsOff) < 10 ? 'green' : 
+                                     Math.abs(noteInfo.centsOff) < 25 ? 'orange' : 'red'
                             }}>
-                              Avvikelse: {refCents > 0 ? '+' : ''}{Math.round(refCents)} cent
+                              Avvikelse: {noteInfo.centsOff > 0 ? '+' : ''}{Math.round(noteInfo.centsOff)} cent
                             </div>
                             <div className="pitch-clarity">
                               Klarhet: {Math.round(pitchResult.clarity * 100)}%
