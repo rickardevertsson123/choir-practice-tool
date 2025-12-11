@@ -53,6 +53,9 @@ function ScorePlayerPage() {
   const [selectedVoice, setSelectedVoice] = useState<VoiceId | null>(null)
   const selectedVoiceRef = useRef<VoiceId | null>(null)
   
+  // Voice selection menu state
+  const [showVoiceMenu, setShowVoiceMenu] = useState(false)
+  
   // Synkronisera selectedVoiceRef med selectedVoice state och rensa state
   useEffect(() => {
     selectedVoiceRef.current = selectedVoice;
@@ -952,12 +955,86 @@ function ScorePlayerPage() {
             ref={scoreContainerRef} 
             id="score-container" 
             className="score-container"
+            onClick={() => {
+              if (scoreTimeline && isPlaying) {
+                handlePlay(); // Pausar om vi spelar
+              }
+            }}
+            style={{ cursor: isPlaying ? 'pointer' : 'default' }}
           >
             {!osmdRef.current && <p>Välj en MusicXML- eller MXL-fil för att visa noter</p>}
             {scoreTimeline && (
               <>
                 <canvas ref={trailCanvasRef} className="trail-canvas" />
                 <div ref={playheadRef} className="playhead-marker" />
+                
+                {/* Overlay-kontroller */}
+                {!isPlaying && (
+                  <div className="score-overlay-controls">
+                    <button 
+                      className="overlay-play-button" 
+                      onClick={handlePlay}
+                      aria-label="Play"
+                    >
+                      ▶
+                    </button>
+                    {currentTime > 0 && (
+                      <button 
+                        className="overlay-stop-button" 
+                        onClick={handleStop}
+                        aria-label="Stop"
+                      >
+                        ■
+                      </button>
+                    )}
+                    <div className="overlay-mic-container">
+                      <button 
+                        className={`overlay-mic-button ${micActive ? 'active' : ''}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (micActive) {
+                            handleMicToggle();
+                          } else {
+                            setShowVoiceMenu(!showVoiceMenu);
+                          }
+                        }}
+                        aria-label="Microphone"
+                      >
+                        🎤
+                      </button>
+                      
+                      {/* Cirkulär stämval-meny */}
+                      {showVoiceMenu && !micActive && (
+                        <div className="voice-circle-menu">
+                          {getVoices().filter(v => !v.toLowerCase().includes('keyboard')).map((voice, index, arr) => {
+                            const angle = (index / arr.length) * 2 * Math.PI - Math.PI / 2;
+                            const radius = 150;
+                            const x = Math.cos(angle) * radius;
+                            const y = Math.sin(angle) * radius;
+                            
+                            return (
+                              <button
+                                key={voice}
+                                className="voice-circle-item"
+                                style={{
+                                  transform: `translate(${x}px, ${y}px)`
+                                }}
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  setSelectedVoice(voice);
+                                  setShowVoiceMenu(false);
+                                  await handleMicToggle();
+                                }}
+                              >
+                                {buildVoiceDisplayLabel(voice, getVoices(), partMetadata)}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </div>

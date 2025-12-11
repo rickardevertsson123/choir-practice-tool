@@ -679,3 +679,153 @@
 }
 
 /* Trail segments are styled inline for performance */
+
+/* Overlay Controls */
+.score-overlay-controls {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  gap: 30px;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.overlay-play-button,
+.overlay-stop-button {
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.3);
+  color: white;
+  font-size: 80px;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  padding: 0;
+  line-height: 1;
+}
+
+.overlay-play-button:hover,
+.overlay-stop-button:hover {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+/* Responsiv storlek */
+@media (max-width: 768px) {
+  .overlay-play-button,
+  .overlay-stop-button {
+    width: 160px;
+    height: 160px;
+    font-size: 64px;
+  }
+  
+  .score-overlay-controls {
+    gap: 20px;
+  }
+}
+
+/* Microphone Overlay Control */
+.overlay-mic-container {
+  position: relative;
+}
+
+.overlay-mic-button {
+  width: 200px;
+  height: 200px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(100, 100, 100, 0.3);
+  color: white;
+  font-size: 80px;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  padding: 0;
+  line-height: 1;
+}
+
+.overlay-mic-button:hover {
+  background: rgba(100, 100, 100, 0.5);
+}
+
+.overlay-mic-button.active {
+  background: rgba(220, 53, 69, 0.4);
+}
+
+.overlay-mic-button.active:hover {
+  background: rgba(220, 53, 69, 0.6);
+}
+
+/* Cirkulär stämval-meny */
+.voice-circle-menu {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+
+.voice-circle-item {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform-origin: center;
+  width: 120px;
+  height: 120px;
+  border-radius: 50%;
+  border: 2px solid white;
+  background: rgba(0, 123, 255, 0.8);
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 10px;
+  transition: all 0.2s;
+  animation: voiceItemFadeIn 0.3s ease-out;
+}
+
+.voice-circle-item:hover {
+  background: rgba(0, 123, 255, 1);
+  transform: scale(1.1);
+  z-index: 10;
+}
+
+@keyframes voiceItemFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* Responsiv storlek för mikrofon */
+@media (max-width: 768px) {
+  .overlay-mic-button {
+    width: 160px;
+    height: 160px;
+    font-size: 64px;
+  }
+  
+  .voice-circle-item {
+    width: 100px;
+    height: 100px;
+    font-size: 12px;
+  }
+}
