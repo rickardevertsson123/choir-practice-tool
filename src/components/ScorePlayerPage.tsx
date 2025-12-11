@@ -606,8 +606,14 @@ function ScorePlayerPage() {
               cursorMeasureIndex: osmdRef.current?.cursor.Iterator.CurrentMeasureIndex || 0
             });
             
+            // Filtrera på voice för debug och trail-ritning
+            let candidateNotes = timeline.notes;
+            if (selectedVoiceRef.current !== 'auto') {
+              candidateNotes = candidateNotes.filter(n => n.voice === selectedVoiceRef.current);
+            }
+            
             // Räkna aktiva noter (using SECONDS)
-            const activeNotes = timeline.notes.filter(note =>
+            const activeNotes = candidateNotes.filter(note =>
               nowSeconds >= note.startTimeSeconds &&
               nowSeconds <= note.startTimeSeconds + note.durationSeconds
             );
@@ -615,7 +621,7 @@ function ScorePlayerPage() {
             setDebugActiveNotes(activeNotes.length);
             
             // Debug: Hitta närmaste noter ALLTID
-            const allNotesSorted = [...timeline.notes]
+            const allNotesSorted = [...candidateNotes]
               .sort((a, b) => Math.abs(a.startTimeSeconds - nowSeconds) - Math.abs(b.startTimeSeconds - nowSeconds))
               .slice(0, 10);
             
@@ -639,10 +645,24 @@ function ScorePlayerPage() {
                 const match = findVoiceMatch(noteInfo.exactMidi);
                 setVoiceMatch(match);
                 
-                // Rita färgspår ENDAST när vi missar (orange/röd)
-                const absCents = Math.abs(match.distanceCents);
-                if (match && absCents >= 10 && trailFrameCountRef.current++ % 8 === 0) {
-                  drawTrailSegment(absCents);
+                // Rita färgspår för fel eller paus
+                if (match) {
+                  // Normal matching - rita om off-pitch
+                  const absCents = Math.abs(match.distanceCents);
+                  if (absCents >= 10 && trailFrameCountRef.current++ % 8 === 0) {
+                    drawTrailSegment(absCents);
+                  }
+                } else {
+                  // Ingen match - kolla om det är paus (utanför 50ms tolerans)
+                  const strictActiveNotes = candidateNotes.filter(note =>
+                    nowSeconds >= note.startTimeSeconds &&
+                    nowSeconds <= note.startTimeSeconds + note.durationSeconds
+                  );
+                  
+                  if (strictActiveNotes.length === 0 && trailFrameCountRef.current++ % 8 === 0) {
+                    // Sjunger under paus - rita röd
+                    drawTrailSegment(1000); // Högt värde = röd färg
+                  }
                 }
               } else {
                 setVoiceMatch(null);
@@ -718,24 +738,7 @@ function ScorePlayerPage() {
     }
   };
   
-  // Helper: Find closest octave of target to sung pitch
-  const findClosestOctaveTarget = (sungMidi: number, targetMidi: number): number => {
-    let bestTarget = targetMidi;
-    let bestDist = Math.abs(sungMidi - targetMidi);
 
-    // Try octaves from -4 to +4 (covers full human range)
-    for (let k = -4; k <= 4; k++) {
-      const candidate = targetMidi + 12 * k;
-      const dist = Math.abs(sungMidi - candidate);
-
-      if (dist < bestDist) {
-        bestTarget = candidate;
-        bestDist = dist;
-      }
-    }
-
-    return bestTarget;
-  };
 
   // Hitta matchande stämma baserat på sungen pitch
   const findVoiceMatch = (exactMidi: number, voiceFilter?: VoiceId): VoiceMatch | null => {
@@ -753,15 +756,21 @@ function ScorePlayerPage() {
     }
     
     // STEP 2: FILTER ON CURRENT TIME (CRITICAL)
-    // Use startTimeSeconds and durationSeconds (NOT startWhole/endWhole)
+    // Use startTimeSeconds and durationSeconds with 50ms tolerance for pauses
+    const tolerance = 0.05; // 50ms tolerance
     const activeNotes = candidateNotes.filter(note =>
-      nowSeconds >= note.startTimeSeconds &&
-      nowSeconds <= note.startTimeSeconds + note.durationSeconds
+      nowSeconds >= note.startTimeSeconds - tolerance &&
+      nowSeconds <= note.startTimeSeconds + note.durationSeconds + tolerance
     );
     
-    // STEP 3: NO MATCH IF EMPTY
+    // STEP 3: NO MATCH IF EMPTY (paus)
     if (activeNotes.length === 0) {
-      setDebugMatchInfo(null);
+      setDebugMatchInfo({ 
+        bestVoice: null, 
+        bestTargetMidi: 0, 
+        bestDistanceCents: 0, 
+        allDistances: [] 
+      });
       return null;
     }
     
@@ -787,23 +796,15 @@ function ScorePlayerPage() {
       return null;
     }
     
-    // Find closest note by pitch class (allowing octave transposition)
+    // Find closest note by exact MIDI distance (no octave transposition)
     let bestNote: typeof humanNotes[0] | null = null;
     let bestDistance = Infinity;
     
     for (const note of humanNotes) {
-      // Calculate distance modulo 12 (pitch class distance)
-      const sungPC = ((exactMidi % 12) + 12) % 12;
-      const targetPC = ((note.midiPitch % 12) + 12) % 12;
-      const diff = sungPC - targetPC;
-      // Normalize to [-6, +6] semitones range (shortest path around circle)
-      let normalizedDiff = diff;
-      if (diff > 6) normalizedDiff = diff - 12;
-      if (diff < -6) normalizedDiff = diff + 12;
-      const distanceCents = Math.abs(normalizedDiff * 100);
+      const distance = Math.abs(exactMidi - note.midiPitch);
       
-      if (distanceCents < bestDistance) {
-        bestDistance = distanceCents;
+      if (distance < bestDistance) {
+        bestDistance = distance;
         bestNote = note;
       }
     }
@@ -813,28 +814,24 @@ function ScorePlayerPage() {
       return null;
     }
     
-    // OCTAVE-AWARE MATCHING: Find closest octave of target to sung pitch
-    const targetMidiRaw = bestNote.midiPitch;
-    const targetMidiOctaveAdj = findClosestOctaveTarget(exactMidi, targetMidiRaw);
-    
-    // Calculate cents using octave-adjusted target
+    // Calculate cents using direct MIDI distance
     const distanceCents = 1200 * Math.log2(
-      midiToFrequency(exactMidi) / midiToFrequency(targetMidiOctaveAdj)
+      midiToFrequency(exactMidi) / midiToFrequency(bestNote.midiPitch)
     );
     
     const displayLabel = buildVoiceDisplayLabel(bestNote.voice, getVoices(), partMetadata);
     
     setDebugMatchInfo({
       bestVoice: bestNote.voice,
-      bestTargetMidi: targetMidiOctaveAdj,
+      bestTargetMidi: bestNote.midiPitch,
       bestDistanceCents: distanceCents,
-      allDistances: [{ voice: bestNote.voice, targetMidi: targetMidiOctaveAdj, distanceCents }]
+      allDistances: [{ voice: bestNote.voice, targetMidi: bestNote.midiPitch, distanceCents }]
     });
     
     return {
       voiceId: bestNote.voice,
       displayLabel,
-      targetMidi: targetMidiOctaveAdj,
+      targetMidi: bestNote.midiPitch,
       distanceCents
     };
   };
@@ -1055,7 +1052,11 @@ function ScorePlayerPage() {
                 </div>
               ) : (
                 <div className="no-voice-match">
-                  {pitchResult.frequency ? 'Ingen tydlig stämma' : 'Väntar på sång...'}
+                  {pitchResult.frequency ? (
+                    debugMatchInfo && debugMatchInfo.bestVoice === null ? 
+                      '🔇 Paus - ingen målton' : 
+                      'Ingen tydlig stämma'
+                  ) : 'Väntar på sång...'}
                 </div>
               )}
             </div>

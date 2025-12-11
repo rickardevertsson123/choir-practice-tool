@@ -93,7 +93,7 @@ export function detectPitch(
   const clarity = sumSquares > 0 ? bestCorrelation / sumSquares : 0;
 
   // Require minimum clarity threshold
-  if (clarity < 0.7 || bestPeriod === -1) {
+  if (clarity < 0.4 || bestPeriod === -1) {
     return { frequency: null, clarity };
   }
 
@@ -113,7 +113,7 @@ export function detectPitch(
         const period = minPeriod + i;
         const freq = sampleRate / period;
         
-        // Calculate distance to target in log space (octave-independent)
+        // Calculate distance to target in log space
         const distance = Math.abs(Math.log2(freq / targetFreq));
         
         candidates.push({ freq, clarity: peakClarity, distance });
