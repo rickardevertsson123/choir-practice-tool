@@ -9,10 +9,23 @@ import './ScorePlayerPage.css'
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
 
+// Two-phase pitch evaluation: ATTACK (pitch lock) vs SUSTAIN (quality evaluation)
+const ATTACK_PHASE_MS = 80;  // Attack phase: pitch lock only, no quality evaluation
+
+// Grace window and stability constants (dynamic per note duration)
+const MAX_GRACE_MS = 120;
+const MIN_GRACE_MS = 35;
+const MAX_STABLE_MS = 120;
+const MIN_STABLE_MS = 35;
+
 function midiToNoteName(midi: number): string {
   const noteIndex = midi % 12;
   const octave = Math.floor(midi / 12) - 1;
   return NOTE_NAMES[noteIndex] + octave;
+}
+
+function makeTargetKey(note: { voice: string; startTimeSeconds: number; midiPitch: number }): string {
+  return `${note.voice}|${note.startTimeSeconds.toFixed(3)}|${note.midiPitch}`;
 }
 
 function ScorePlayerPage() {
@@ -37,6 +50,19 @@ function ScorePlayerPage() {
   const micStreamRef = useRef<MediaStream | null>(null)
   const animationFrameRef = useRef<number>(0)
   
+  // MIDI stabilization state
+  const stableMidiRef = useRef<number | null>(null)
+  const lastMidiRef = useRef<number | null>(null)
+  const jumpFramesRef = useRef<number>(0)
+  const lastTargetMidiRef = useRef<number | null>(null)
+  
+  // Note change grace window and pitch stability tracking
+  const currentTargetKeyRef = useRef<string | null>(null)
+  const targetStartTimeRef = useRef<number | null>(null)
+  const targetDurationSecondsRef = useRef<number | null>(null)
+  const stableSinceRef = useRef<number | null>(null)
+  const lastPitchMidiRef = useRef<number | null>(null)
+  
   // Voice matching state
   interface VoiceMatch {
     voiceId: VoiceId;
@@ -55,6 +81,10 @@ function ScorePlayerPage() {
   
   // Voice selection menu state
   const [showVoiceMenu, setShowVoiceMenu] = useState(false)
+  
+  // Corner controls state
+  const [showSpeedSlider, setShowSpeedSlider] = useState(false)
+  const [showMixerPanel, setShowMixerPanel] = useState(false)
   
   // Synkronisera selectedVoiceRef med selectedVoice state och rensa state
   useEffect(() => {
@@ -83,6 +113,11 @@ function ScorePlayerPage() {
   // Tempo control
   const [tempoMultiplier, setTempoMultiplier] = useState(1.0)
   
+  // Latency compensation
+  const [latencyMs, setLatencyMs] = useState<number>(220)
+  const latencyMsRef = useRef<number>(latencyMs)
+  useEffect(() => { latencyMsRef.current = latencyMs; }, [latencyMs])
+  
   // Debug state
   const [debugActiveNotes, setDebugActiveNotes] = useState(0)
   const [debugActiveNotesByVoice, setDebugActiveNotesByVoice] = useState<Map<VoiceId, Array<{ noteName: string; midi: number }>>>(new Map())
@@ -105,6 +140,12 @@ function ScorePlayerPage() {
     endWhole: number;
     isActive: boolean;
   }>>([])
+  const [debugPhaseInfo, setDebugPhaseInfo] = useState<{
+    phase: 'ATTACK' | 'SUSTAIN' | 'NONE';
+    timeSinceNoteStartMs: number;
+    distanceCents: number;
+    clarity: number;
+  } | null>(null)
   
   // Färgspår för pitch accuracy (canvas)
   const trailCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -119,7 +160,7 @@ function ScorePlayerPage() {
         osmdRef.current = new OpenSheetMusicDisplay(scoreContainerRef.current, {
           autoResize: true,
           backend: 'svg',
-          followCursor: true,
+          followCursor: false,
           drawingParameters: 'compact'
         })
         console.log('OSMD initialiserat')
@@ -440,17 +481,20 @@ function ScorePlayerPage() {
         playheadRef.current.style.height = `${pos.height}px`;
       }
 
-      // Auto-scroll
-      const cursorElement = osmdRef.current.cursor.cursorElement;
-      if (cursorElement && playerRef.current.isPlaying()) {
-        const cursorRect = cursorElement.getBoundingClientRect();
-        const containerRect = scoreContainerRef.current.getBoundingClientRect();
+      // Custom auto-scroll (OSMD's followCursor disabled to avoid conflicts)
+      if (cursorPositionsRef.current.length > currentStepIndex) {
+        const pos = cursorPositionsRef.current[currentStepIndex];
+        const container = scoreContainerRef.current;
+        const containerScrollTop = container.scrollTop;
+        const containerHeight = container.clientHeight;
         
-        if (cursorRect.bottom > containerRect.bottom - 80) {
-          cursorElement.scrollIntoView({
-            behavior: 'smooth',
-            block: 'center'
-          });
+        // Scrolla endast om markören är utanför synligt område
+        if (pos.top > containerScrollTop + containerHeight - 100) {
+          // Markören nära botten - scrolla ner
+          container.scrollTop = pos.top - containerHeight / 2;
+        } else if (pos.top < containerScrollTop + 50) {
+          // Markören nära toppen - scrolla upp
+          container.scrollTop = pos.top - 100;
         }
       }
     }
@@ -547,6 +591,72 @@ function ScorePlayerPage() {
     }
   }
   
+  // Helper: Get beat durations based on current tempo
+  function getBeatDurations(): { quarter: number; sixteenth: number } {
+    if (!scoreTimeline) {
+      const quarter = 60 / 120;
+      return { quarter, sixteenth: quarter / 4 };
+    }
+    const effectiveTempo = scoreTimeline.tempoBpm * tempoMultiplier;
+    const quarter = 60 / effectiveTempo;
+    return { quarter, sixteenth: quarter / 4 };
+  }
+  
+  // MIDI stabilization function
+  function stabilizeMidi(rawMidi: number): number {
+    const stableMidi = stableMidiRef.current;
+    const lastMidi = lastMidiRef.current;
+    let jumpFrames = jumpFramesRef.current;
+
+    if (stableMidi == null) {
+      stableMidiRef.current = rawMidi;
+      lastMidiRef.current = rawMidi;
+      jumpFramesRef.current = 0;
+      return rawMidi;
+    }
+
+    // 100 cent per halvton
+    const diffCents = 100 * (rawMidi - stableMidi);
+    const absDiff = Math.abs(diffCents);
+
+    // Små variationer (< 20 cent) → mjuk smoothing
+    if (absDiff < 20) {
+      const smoothed = stableMidi * 0.7 + rawMidi * 0.3;
+      stableMidiRef.current = smoothed;
+      lastMidiRef.current = rawMidi;
+      jumpFramesRef.current = 0;
+      return smoothed;
+    }
+
+    // Mellanstora hopp (20–80 cent) → mer följsamt
+    if (absDiff < 80) {
+      const smoothed = stableMidi * 0.4 + rawMidi * 0.6;
+      stableMidiRef.current = smoothed;
+      lastMidiRef.current = rawMidi;
+      jumpFramesRef.current = 0;
+      return smoothed;
+    }
+
+    // Stora hopp (>= 80 cent) → potentiellt nytt tonsteg (halvton eller mer)
+    const sameDirection =
+      lastMidi != null && Math.sign(rawMidi - stableMidi) === Math.sign(lastMidi - stableMidi);
+
+    jumpFrames = sameDirection ? jumpFrames + 1 : 1;
+
+    // Kräver 5 konsekutiva frames i samma riktning innan vi accepterar ny ton
+    if (jumpFrames >= 5) {
+      stableMidiRef.current = rawMidi;
+      lastMidiRef.current = rawMidi;
+      jumpFramesRef.current = 0;
+      return rawMidi;
+    }
+
+    // Annars: behandla som glitch → behåll gamla stableMidi
+    lastMidiRef.current = rawMidi;
+    jumpFramesRef.current = jumpFrames;
+    return stableMidi;
+  }
+  
   // Aktivera mikrofon och starta pitch detection
   const handleMicToggle = async () => {
     if (micActive) {
@@ -602,7 +712,8 @@ function ScorePlayerPage() {
           if (playerIsPlaying && playerRef.current) {
             const timeline = playerRef.current['timeline'];
             if (timeline) {
-              const nowSeconds = playerRef.current.getCurrentTime();
+              const rawNow = playerRef.current.getCurrentTime();
+              const correctedNow = rawNow - latencyMsRef.current / 1000;
               
               // Find active notes from selected voice only
               let candidateNotes = timeline.notes;
@@ -611,8 +722,8 @@ function ScorePlayerPage() {
               }
               
               const activeNotes = candidateNotes.filter(note =>
-                nowSeconds >= note.startTimeSeconds &&
-                nowSeconds <= note.startTimeSeconds + note.durationSeconds
+                correctedNow >= note.startTimeSeconds &&
+                correctedNow <= note.startTimeSeconds + note.durationSeconds
               );
               
               // Use first active note as target hint
@@ -620,21 +731,12 @@ function ScorePlayerPage() {
                 const humanNotes = activeNotes.filter(note => !note.voice.toLowerCase().includes('keyboard'));
                 if (humanNotes.length > 0) {
                   targetHint = { targetMidi: humanNotes[0].midiPitch };
-                  const targetFreq = 440 * Math.pow(2, (targetHint.targetMidi - 69) / 12);
-                  const targetNote = (() => {
-                    const noteIndex = targetHint.targetMidi % 12;
-                    const octave = Math.floor(targetHint.targetMidi / 12) - 1;
-                    return ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'][noteIndex] + octave;
-                  })();
-                  // Target hint set for pitch detection
                 }
               }
             }
           }
           
           const result = detectPitch(buffer, audioContextRef.current!.sampleRate, targetHint)
-          
-          // Pitch detection completed
           
           setPitchResult(result)
           
@@ -643,11 +745,12 @@ function ScorePlayerPage() {
             if (!timeline) return;
             
             // TIDSKÄLLA: wall-clock seconds
-            const nowSeconds = playerRef.current.getCurrentTime();
+            const rawNow = playerRef.current.getCurrentTime();
+            const correctedNow = rawNow - latencyMsRef.current / 1000;
             
-            // Debug: Spara tidsinfo ALLTID
+            // Debug: Spara tidsinfo ALLTID (visa raw för användaren)
             setDebugTimeInfo({
-              playbackTimeSeconds: nowSeconds,
+              playbackTimeSeconds: rawNow,
               cursorWholeTime: 0, // Not used anymore
               cursorMeasureIndex: osmdRef.current?.cursor.Iterator.CurrentMeasureIndex || 0
             });
@@ -658,22 +761,22 @@ function ScorePlayerPage() {
               candidateNotes = candidateNotes.filter(n => n.voice === selectedVoiceRef.current);
             }
             
-            // Räkna aktiva noter (using SECONDS)
+            // Räkna aktiva noter (using correctedNow)
             const tolerance = 0.05;
             const activeNotes = candidateNotes.filter(note =>
-              nowSeconds >= note.startTimeSeconds - tolerance &&
-              nowSeconds <= note.startTimeSeconds + note.durationSeconds + tolerance
+              correctedNow >= note.startTimeSeconds - tolerance &&
+              correctedNow <= note.startTimeSeconds + note.durationSeconds + tolerance
             );
             
             setDebugActiveNotes(activeNotes.length);
             
-            // Debug: Hitta närmaste noter ALLTID
+            // Debug: Hitta närmaste noter ALLTID (using correctedNow)
             const allNotesSorted = [...candidateNotes]
-              .sort((a, b) => Math.abs(a.startTimeSeconds - nowSeconds) - Math.abs(b.startTimeSeconds - nowSeconds))
+              .sort((a, b) => Math.abs(a.startTimeSeconds - correctedNow) - Math.abs(b.startTimeSeconds - correctedNow))
               .slice(0, 10);
             
             const noteIntervals = allNotesSorted.map(note => {
-              const isActive = nowSeconds >= note.startTimeSeconds - tolerance && nowSeconds <= note.startTimeSeconds + note.durationSeconds + tolerance;
+              const isActive = correctedNow >= note.startTimeSeconds - tolerance && correctedNow <= note.startTimeSeconds + note.durationSeconds + tolerance;
               return {
                 voice: note.voice,
                 displayLabel: buildVoiceDisplayLabel(note.voice, getVoices(), partMetadata),
@@ -685,48 +788,126 @@ function ScorePlayerPage() {
             });
             setDebugNoteIntervals(noteIntervals);
             
-            // Sätt currentTargetNote baserat på aktiva noter (oavsett om användaren sjunger)
+            // Sätt currentTargetNote baserat på aktiva noter OCH reset stabilisering vid notbyte
+            let targetMidi: number | null = null;
+            let bestNote: any = null;
             
             if (activeNotes.length > 0 && selectedVoiceRef.current) {
               const humanNotes = activeNotes.filter(note => !note.voice.toLowerCase().includes('keyboard'));
               if (humanNotes.length > 0) {
-                const targetNote = humanNotes[0];
-                const displayLabel = buildVoiceDisplayLabel(targetNote.voice, getVoices(), partMetadata);
+                bestNote = humanNotes[0];
+                const displayLabel = buildVoiceDisplayLabel(bestNote.voice, getVoices(), partMetadata);
                 setCurrentTargetNote({
                   displayLabel,
-                  targetMidi: targetNote.midiPitch
+                  targetMidi: bestNote.midiPitch
                 });
+                targetMidi = bestNote.midiPitch;
+                
+                // Track target note changes for grace window
+                const key = makeTargetKey(bestNote);
+                if (currentTargetKeyRef.current !== key) {
+                  currentTargetKeyRef.current = key;
+                  targetStartTimeRef.current = bestNote.startTimeSeconds;
+                  targetDurationSecondsRef.current = bestNote.durationSeconds;
+                  // Reset pitch stability tracking
+                  stableSinceRef.current = null;
+                  lastPitchMidiRef.current = null;
+                  // Reset MIDI smoothing
+                  stableMidiRef.current = null;
+                  lastMidiRef.current = null;
+                  jumpFramesRef.current = 0;
+                }
+                lastTargetMidiRef.current = targetMidi;
               } else {
                 setCurrentTargetNote(null);
+                currentTargetKeyRef.current = null;
+                targetStartTimeRef.current = null;
               }
             } else {
               setCurrentTargetNote(null);
+              currentTargetKeyRef.current = null;
+              targetStartTimeRef.current = null;
+              targetDurationSecondsRef.current = null;
+              lastTargetMidiRef.current = null;
             }
             
             // Voice matching om vi har pitch
             if (result.frequency) {
               const noteInfo = frequencyToNoteInfo(result.frequency);
               if (noteInfo) {
-                const match = findVoiceMatch(noteInfo.exactMidi);
-                setVoiceMatch(match);
+                const rawMidi = noteInfo.exactMidi;
+                const stabilizedMidi = stabilizeMidi(rawMidi);
                 
-                // Rita färgspår för fel eller paus
-                if (match) {
-                  // Normal matching - rita endast om avvikelse >= 10 cent
-                  const absCents = Math.abs(match.distanceCents);
-                  if (absCents >= 10 && trailFrameCountRef.current++ % 2 === 0) {
-                    drawTrailSegment(absCents);
-                  }
-                } else {
-                  // Ingen match - kolla om det är paus (utanför 50ms tolerans)
-                  const strictActiveNotes = candidateNotes.filter(note =>
-                    nowSeconds >= note.startTimeSeconds &&
-                    nowSeconds <= note.startTimeSeconds + note.durationSeconds
+                // Debug logging
+                console.log(`PITCH STABILIZER raw=${rawMidi.toFixed(2)} stable=${stabilizedMidi.toFixed(2)}`);
+                
+                // TWO-PHASE MODEL: ATTACK vs SUSTAIN
+                const targetStart = targetStartTimeRef.current;
+                const timeSinceNoteStartMs = targetStart != null ? (correctedNow - targetStart) * 1000 : 0;
+                const isInAttackPhase = timeSinceNoteStartMs < ATTACK_PHASE_MS;
+                
+                // Calculate distance to target for phase determination
+                let distanceCents = 0;
+                if (bestNote) {
+                  distanceCents = 1200 * Math.log2(
+                    midiToFrequency(stabilizedMidi) / midiToFrequency(bestNote.midiPitch)
                   );
+                }
+                
+                // Debug phase info
+                setDebugPhaseInfo({
+                  phase: targetStart == null ? 'NONE' : (isInAttackPhase ? 'ATTACK' : 'SUSTAIN'),
+                  timeSinceNoteStartMs,
+                  distanceCents,
+                  clarity: result.clarity
+                });
+                
+                if (isInAttackPhase) {
+                  // ATTACK PHASE: Pitch lock only, no quality evaluation
+                  // Accept pitch if within ~150 cents (roughly correct note class)
+                  const isPitchLocked = Math.abs(distanceCents) < 150;
                   
-                  if (strictActiveNotes.length === 0 && trailFrameCountRef.current++ % 2 === 0) {
-                    // Sjunger under paus - rita orange
-                    drawTrailSegment(-1); // Negativt värde = paus (orange)
+                  if (isPitchLocked) {
+                    // Show match but don't evaluate quality
+                    const match = findVoiceMatch(stabilizedMidi, correctedNow);
+                    setVoiceMatch(match);
+                  } else {
+                    setVoiceMatch(null);
+                  }
+                  
+                  // NO coloring during attack phase
+                  // NO trail drawing
+                  // NO scoring
+                  
+                } else {
+                  // SUSTAIN PHASE: Quality evaluation
+                  const match = findVoiceMatch(stabilizedMidi, correctedNow);
+                  setVoiceMatch(match);
+                  
+                  // In sustain phase, we only require clarity (attack phase already handled transition)
+                  const hasGoodClarity = result.clarity >= 0.4;
+                  
+                  // GATE: Only evaluate/draw when clarity is good
+                  if (hasGoodClarity) {
+                    // Rita färgspår för fel eller paus
+                    if (match) {
+                      // Normal matching - rita endast om avvikelse >= 10 cent
+                      const absCents = Math.abs(match.distanceCents);
+                      if (absCents >= 10 && trailFrameCountRef.current++ % 2 === 0) {
+                        drawTrailSegment(absCents);
+                      }
+                    } else {
+                      // Ingen match - kolla om det är paus (utanför 50ms tolerans)
+                      const strictActiveNotes = candidateNotes.filter(note =>
+                        correctedNow >= note.startTimeSeconds &&
+                        correctedNow <= note.startTimeSeconds + note.durationSeconds
+                      );
+                      
+                      if (strictActiveNotes.length === 0 && trailFrameCountRef.current++ % 2 === 0) {
+                        // Sjunger under paus - rita orange
+                        drawTrailSegment(-1); // Negativt värde = paus (orange)
+                      }
+                    }
                   }
                 }
               } else {
@@ -751,14 +932,11 @@ function ScorePlayerPage() {
     }
   }
   
-  // Hitta matchande stämma baserat på sungen pitch
-  const findVoiceMatch = (exactMidi: number, voiceFilter?: VoiceId): VoiceMatch | null => {
+  // Hitta matchande stämma baserat på sungen pitch med tidsfönster
+  const findVoiceMatch = (exactMidi: number, correctedNow: number): VoiceMatch | null => {
     if (!playerRef.current) return null;
     const timeline = playerRef.current['timeline'];
     if (!timeline) return null;
-    
-    // STEP 0: Get current time in SECONDS (wall-clock time)
-    const nowSeconds = playerRef.current.getCurrentTime();
     
     // STEP 1: Filter on selected voice only (required)
     if (!selectedVoiceRef.current) {
@@ -773,16 +951,19 @@ function ScorePlayerPage() {
     
     const candidateNotes = timeline.notes.filter(n => n.voice === selectedVoiceRef.current);
     
-    // STEP 2: FILTER ON CURRENT TIME (CRITICAL)
-    // Use startTimeSeconds and durationSeconds with 50ms tolerance for pauses
-    const tolerance = 0.05; // 50ms tolerance
-    const activeNotes = candidateNotes.filter(note =>
-      nowSeconds >= note.startTimeSeconds - tolerance &&
-      nowSeconds <= note.startTimeSeconds + note.durationSeconds + tolerance
+    // STEP 2: Beräkna tempo-baserat tidsfönster
+    const { sixteenth } = getBeatDurations();
+    let windowPast = Math.max(0.08, sixteenth * 2);
+    windowPast = Math.min(windowPast, 0.35); // Max 350ms
+    const windowFuture = 0.05;
+    
+    // STEP 3: Hitta kandidater i tidsfönstret
+    const candidatesInWindow = candidateNotes.filter(note =>
+      correctedNow >= note.startTimeSeconds - windowPast &&
+      correctedNow <= note.startTimeSeconds + note.durationSeconds + windowFuture
     );
     
-    // STEP 3: NO MATCH IF EMPTY (paus)
-    if (activeNotes.length === 0) {
+    if (candidatesInWindow.length === 0) {
       setDebugMatchInfo({ 
         bestVoice: null, 
         bestTargetMidi: 0, 
@@ -792,9 +973,9 @@ function ScorePlayerPage() {
       return null;
     }
     
-    // Debug: gruppera ALLA aktiva noter per voice
+    // Debug: gruppera ALLA kandidater per voice
     const notesByVoice = new Map<VoiceId, Array<{ noteName: string; midi: number }>>();
-    for (const note of activeNotes) {
+    for (const note of candidatesInWindow) {
       if (!notesByVoice.has(note.voice)) {
         notesByVoice.set(note.voice, []);
       }
@@ -805,25 +986,38 @@ function ScorePlayerPage() {
     }
     setDebugActiveNotesByVoice(notesByVoice);
     
-    // STEP 4: Pitch match ONLY within activeNotes
-    // Exclude keyboard voices
-    const humanNotes = activeNotes.filter(note => !note.voice.toLowerCase().includes('keyboard'));
+    // STEP 4: Exclude keyboard voices
+    const humanNotes = candidatesInWindow.filter(note => !note.voice.toLowerCase().includes('keyboard'));
     
     if (humanNotes.length === 0) {
       setDebugMatchInfo(null);
       return null;
     }
     
-    // Find closest note by exact MIDI distance (no octave transposition)
+    // STEP 5: Välj bästa kandidat baserat på tid + pitch
+    const wTime = 1.0;
+    const wPitch = 0.015;
+    
     let bestNote: typeof humanNotes[0] | null = null;
-    let bestDistance = Infinity;
+    let bestCost = Infinity;
+    let bestDistanceCents = 0;
     
     for (const note of humanNotes) {
-      const distance = Math.abs(exactMidi - note.midiPitch);
+      const timeCenter = note.startTimeSeconds + note.durationSeconds / 2;
+      const timeDiff = Math.abs(timeCenter - correctedNow);
       
-      if (distance < bestDistance) {
-        bestDistance = distance;
+      const pitchDiffSemitones = Math.abs(exactMidi - note.midiPitch);
+      const pitchDiffCents = pitchDiffSemitones * 100;
+      
+      const cost = wTime * timeDiff + wPitch * pitchDiffCents;
+      
+      if (cost < bestCost) {
+        bestCost = cost;
         bestNote = note;
+        
+        bestDistanceCents = 1200 * Math.log2(
+          midiToFrequency(exactMidi) / midiToFrequency(note.midiPitch)
+        );
       }
     }
     
@@ -832,25 +1026,20 @@ function ScorePlayerPage() {
       return null;
     }
     
-    // Calculate cents using direct MIDI distance
-    const distanceCents = 1200 * Math.log2(
-      midiToFrequency(exactMidi) / midiToFrequency(bestNote.midiPitch)
-    );
-    
     const displayLabel = buildVoiceDisplayLabel(bestNote.voice, getVoices(), partMetadata);
     
     setDebugMatchInfo({
       bestVoice: bestNote.voice,
       bestTargetMidi: bestNote.midiPitch,
-      bestDistanceCents: distanceCents,
-      allDistances: [{ voice: bestNote.voice, targetMidi: bestNote.midiPitch, distanceCents }]
+      bestDistanceCents: bestDistanceCents,
+      allDistances: [{ voice: bestNote.voice, targetMidi: bestNote.midiPitch, distanceCents: bestDistanceCents }]
     });
     
     return {
       voiceId: bestNote.voice,
       displayLabel,
       targetMidi: bestNote.midiPitch,
-      distanceCents
+      distanceCents: bestDistanceCents
     };
   };
   
@@ -968,6 +1157,72 @@ function ScorePlayerPage() {
                 <canvas ref={trailCanvasRef} className="trail-canvas" />
                 <div ref={playheadRef} className="playhead-marker" />
                 
+                {/* Graphical Pitch Detector Overlay */}
+                {micActive && isPlaying && currentTargetNote && (
+                  <div className="pitch-detector-overlay">
+                    <div className="pitch-detector-content">
+                      {/* Sjungen ton (störst) */}
+                      <div className="sung-note">
+                        {pitchResult.frequency ? (
+                          (() => {
+                            const noteInfo = frequencyToNoteInfo(pitchResult.frequency);
+                            return noteInfo ? noteInfo.noteName : '---';
+                          })()
+                        ) : '---'}
+                      </div>
+                      
+                      {/* Målton (mindre) */}
+                      <div className="target-note">
+                        Mål: {midiToNoteName(currentTargetNote.targetMidi)}
+                      </div>
+                      
+                      {/* Hz och Cents */}
+                      <div className="pitch-info">
+                        <span className="pitch-hz">
+                          {pitchResult.frequency ? `${pitchResult.frequency.toFixed(1)} Hz` : '--- Hz'}
+                        </span>
+                        <span className="pitch-cents">
+                          {voiceMatch ? `${voiceMatch.distanceCents > 0 ? '+' : ''}${Math.round(voiceMatch.distanceCents)} cent` : '--- cent'}
+                        </span>
+                        <span className="pitch-clarity">
+                          Clarity: {Math.round(pitchResult.clarity * 100)}%
+                        </span>
+                      </div>
+                      
+                      {/* Horisontell bar med slider */}
+                      <div className="pitch-bar-container">
+                        <div className="pitch-bar-labels">
+                          <span className="bar-label-left">♭-50</span>
+                          <span className="bar-label-center">Perfect</span>
+                          <span className="bar-label-right">+50♯</span>
+                        </div>
+                        <div className="pitch-bar">
+                          <div className="pitch-bar-track"></div>
+                          {voiceMatch && (
+                            <div 
+                              className="pitch-bar-indicator"
+                              style={{
+                                left: `${Math.max(0, Math.min(100, ((voiceMatch.distanceCents + 50) / 100) * 100))}%`,
+                                backgroundColor: (() => {
+                                  const absCents = Math.abs(voiceMatch.distanceCents);
+                                  if (absCents <= 10) return '#22c55e'; // green
+                                  if (absCents >= 50) return '#ef4444'; // red
+                                  // Gradient from green to red
+                                  const ratio = (absCents - 10) / 40; // 0 at 10 cents, 1 at 50 cents
+                                  const r = Math.round(34 + (239 - 34) * ratio);
+                                  const g = Math.round(197 - (197 - 68) * ratio);
+                                  const b = Math.round(94 - (94 - 68) * ratio);
+                                  return `rgb(${r}, ${g}, ${b})`;
+                                })()
+                              }}
+                            />
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
                 {/* Overlay-kontroller */}
                 {!isPlaying && (
                   <div className="score-overlay-controls">
@@ -1033,6 +1288,109 @@ function ScorePlayerPage() {
                         </div>
                       )}
                     </div>
+                  </div>
+                )}
+                
+                {/* Corner Controls - Speed & Mixer */}
+                <div className="corner-controls">
+                  <button 
+                    className="corner-speed-button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowSpeedSlider(!showSpeedSlider);
+                      setShowMixerPanel(false);
+                    }}
+                    aria-label="Speed Control"
+                  >
+                    <div className="speed-icon-content">
+                      <span className="speed-note">♩</span>
+                      <span className="speed-value">{Math.round(scoreTimeline.tempoBpm * tempoMultiplier)}</span>
+                    </div>
+                  </button>
+                  
+                  <button 
+                    className="corner-mixer-button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setShowMixerPanel(!showMixerPanel);
+                      setShowSpeedSlider(false);
+                    }}
+                    aria-label="Mixer"
+                  >
+                    🎚️
+                  </button>
+                </div>
+                
+                {/* Speed Slider Panel */}
+                {showSpeedSlider && (
+                  <div className="speed-slider-panel">
+                    <input
+                      type="range"
+                      min={0.25}
+                      max={2.0}
+                      step={0.05}
+                      value={tempoMultiplier}
+                      onChange={(e) => handleTempoChange(parseFloat(e.target.value))}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                    <div className="speed-presets">
+                      {[0.5, 0.75, 1.0, 1.25, 1.5].map(mult => (
+                        <button
+                          key={mult}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleTempoChange(mult);
+                          }}
+                          className={tempoMultiplier === mult ? 'active' : ''}
+                        >
+                          {mult}x
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                {/* Mixer Panel */}
+                {showMixerPanel && (
+                  <div className="mixer-panel">
+                    {getVoices().map(voice => {
+                      const settings = getVoiceSettings(voice);
+                      const displayLabel = buildVoiceDisplayLabel(voice, getVoices(), partMetadata);
+                      return (
+                        <div key={voice} className="mixer-voice-row">
+                          <div className="mixer-voice-name">{displayLabel}</div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            value={settings.volume * 100}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              handleVoiceSettingsChange(voice, { volume: parseInt(e.target.value) / 100 });
+                            }}
+                            onClick={(e) => e.stopPropagation()}
+                          />
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleVoiceSettingsChange(voice, { muted: !settings.muted });
+                            }}
+                            className={settings.muted ? 'active' : ''}
+                          >
+                            {settings.muted ? '🔇' : '🔊'}
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleVoiceSettingsChange(voice, { solo: !settings.solo });
+                            }}
+                            className={settings.solo ? 'active' : ''}
+                          >
+                            S
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </>
@@ -1104,25 +1462,53 @@ function ScorePlayerPage() {
                 </div>
               )}
               
-              {/* Visa avvikelse endast när användaren sjunger */}
+              {/* Visa avvikelse endast när användaren sjunger OCH pitch är stabil */}
               {voiceMatch && pitchResult.frequency ? (
-                <div className="voice-accuracy">
-                  <div className="voice-cents" style={{
-                    color: Math.abs(voiceMatch.distanceCents) < 10 ? 'green' : 
-                           Math.abs(voiceMatch.distanceCents) < 25 ? 'orange' : 'red'
-                  }}>
-                    Avvikelse: {voiceMatch.distanceCents > 0 ? '+' : ''}{Math.round(voiceMatch.distanceCents)} cent
-                  </div>
-                  <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#666' }}>
-                    {(() => {
-                      const noteInfo = frequencyToNoteInfo(pitchResult.frequency!);
-                      if (noteInfo) {
-                        return `Din ton: ${noteInfo.noteName} (MIDI ${noteInfo.exactMidi.toFixed(2)})`;
-                      }
-                      return null;
-                    })()}
-                  </div>
-                </div>
+                (() => {
+                  const targetStart = targetStartTimeRef.current;
+                  const rawNow = playerRef.current?.getCurrentTime() || 0;
+                  const correctedNow = rawNow - latencyMsRef.current / 1000;
+                  const timeSinceNoteStartMs = targetStart != null ? (correctedNow - targetStart) * 1000 : 0;
+                  const isInAttackPhase = timeSinceNoteStartMs < ATTACK_PHASE_MS;
+                  
+                  if (isInAttackPhase) {
+                    return (
+                      <div className="waiting-for-voice" style={{ color: '#999' }}>
+                        Låser ton...
+                      </div>
+                    );
+                  }
+                  
+                  const hasGoodClarity = pitchResult.clarity >= 0.4;
+                  
+                  if (!hasGoodClarity) {
+                    return (
+                      <div className="waiting-for-voice" style={{ color: '#999' }}>
+                        Väntar på stabil ton...
+                      </div>
+                    );
+                  }
+                  
+                  return (
+                    <div className="voice-accuracy">
+                      <div className="voice-cents" style={{
+                        color: Math.abs(voiceMatch.distanceCents) < 10 ? 'green' : 
+                               Math.abs(voiceMatch.distanceCents) < 25 ? 'orange' : 'red'
+                      }}>
+                        Avvikelse: {voiceMatch.distanceCents > 0 ? '+' : ''}{Math.round(voiceMatch.distanceCents)} cent
+                      </div>
+                      <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#666' }}>
+                        {(() => {
+                          const noteInfo = frequencyToNoteInfo(pitchResult.frequency!);
+                          if (noteInfo) {
+                            return `Din ton: ${noteInfo.noteName} (MIDI ${noteInfo.exactMidi.toFixed(2)})`;
+                          }
+                          return null;
+                        })()}
+                      </div>
+                    </div>
+                  );
+                })()
               ) : currentTargetNote ? (
                 <div className="waiting-for-voice">
                   Väntar på sång...
@@ -1254,6 +1640,22 @@ function ScorePlayerPage() {
             </div>
           )}
           
+          {/* Latency Control */}
+          {micActive && (
+            <div className="latency-control">
+              <h4>⏱️ Latency Compensation</h4>
+              <label>Mic/Playback latency: {latencyMs} ms</label>
+              <input
+                type="range"
+                min={0}
+                max={400}
+                step={10}
+                value={latencyMs}
+                onChange={(e) => setLatencyMs(parseInt(e.target.value, 10))}
+              />
+            </div>
+          )}
+          
           {/* DEBUG PANEL */}
           {micActive && (
             <div className="debug-panel">
@@ -1360,6 +1762,25 @@ function ScorePlayerPage() {
                         </div>
                       </div>
                     ))}
+                  </div>
+                )}
+                
+                {/* Phase debug */}
+                {debugPhaseInfo && (
+                  <div className="debug-section">
+                    <div className="debug-row"><strong>PHASE INFO:</strong></div>
+                    <div className="debug-row debug-indent">
+                      Phase = <strong>{debugPhaseInfo.phase}</strong>
+                    </div>
+                    <div className="debug-row debug-indent">
+                      TimeSinceNoteStart = {debugPhaseInfo.timeSinceNoteStartMs.toFixed(0)} ms
+                    </div>
+                    <div className="debug-row debug-indent">
+                      DistanceCents = {debugPhaseInfo.distanceCents.toFixed(1)}
+                    </div>
+                    <div className="debug-row debug-indent">
+                      Clarity = {debugPhaseInfo.clarity.toFixed(2)}
+                    </div>
                   </div>
                 )}
                 

@@ -719,7 +719,8 @@
 /* Responsiv storlek */
 @media (max-width: 768px) {
   .overlay-play-button,
-  .overlay-stop-button {
+  .overlay-stop-button,
+  .overlay-mic-button {
     width: 160px;
     height: 160px;
     font-size: 64px;
@@ -828,4 +829,454 @@
     height: 100px;
     font-size: 12px;
   }
+}
+
+/* Corner Controls */
+.corner-controls {
+  position: absolute;
+  bottom: 20px;
+  right: 20px;
+  display: flex;
+  gap: 15px;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.corner-speed-button,
+.corner-mixer-button {
+  width: 90px;
+  height: 90px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(0, 0, 0, 0.3);
+  color: white;
+  font-size: 50px;
+  cursor: pointer;
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  padding: 0;
+}
+
+.corner-speed-button:hover,
+.corner-mixer-button:hover {
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.speed-icon-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.speed-note {
+  font-size: 32px;
+  line-height: 1;
+}
+
+.speed-value {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+/* Speed Slider Panel */
+.speed-slider-panel {
+  position: absolute;
+  bottom: 120px;
+  right: 20px;
+  background: rgba(0, 0, 0, 0.85);
+  padding: 20px;
+  border-radius: 12px;
+  pointer-events: auto;
+  z-index: 101;
+  min-width: 250px;
+}
+
+.speed-slider-panel input[type="range"] {
+  width: 100%;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 3px;
+  outline: none;
+  margin-bottom: 15px;
+}
+
+.speed-slider-panel input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: white;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.speed-presets {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+
+.speed-presets button {
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 14px;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.speed-presets button:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.speed-presets button.active {
+  background: white;
+  color: black;
+}
+
+/* Mixer Panel */
+.mixer-panel {
+  position: absolute;
+  bottom: 120px;
+  right: 20px;
+  background: rgba(0, 0, 0, 0.85);
+  padding: 20px;
+  border-radius: 12px;
+  pointer-events: auto;
+  z-index: 101;
+  min-width: 300px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.mixer-voice-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 15px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.mixer-voice-row:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.mixer-voice-name {
+  color: white;
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 80px;
+}
+
+.mixer-voice-row input[type="range"] {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.3);
+  border-radius: 2px;
+  outline: none;
+}
+
+.mixer-voice-row input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: white;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.mixer-voice-row button {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mixer-voice-row button:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.mixer-voice-row button.active {
+  background: rgba(220, 53, 69, 0.8);
+  border-color: rgba(220, 53, 69, 1);
+}
+
+@media (max-width: 768px) {
+  .corner-speed-button,
+  .corner-mixer-button {
+    width: 70px;
+    height: 70px;
+    font-size: 40px;
+  }
+  
+  .speed-note {
+    font-size: 24px;
+  }
+  
+  .speed-value {
+    font-size: 14px;
+  }
+  
+  .speed-slider-panel,
+  .mixer-panel {
+    min-width: 200px;
+  }
+}
+
+/* Graphical Pitch Detector Overlay - Compact Corner Mode */
+.pitch-detector-overlay {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 15px 20px;
+  border-radius: 12px;
+  pointer-events: none;
+  z-index: 90;
+  min-width: 220px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+
+.pitch-detector-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Sjungen ton (kompakt) */
+.sung-note {
+  font-size: 48px;
+  font-weight: 700;
+  color: white;
+  line-height: 1;
+  text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+}
+
+/* Målton (mindre) */
+.pitch-detector-overlay .target-note {
+  font-size: 14px;
+  color: rgba(255, 255, 255, 0.7);
+  font-weight: 500;
+}
+
+/* Hz, Cents, Clarity */
+.pitch-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+  text-align: center;
+}
+
+.pitch-hz,
+.pitch-cents,
+.pitch-clarity {
+  font-weight: 600;
+  line-height: 1.2;
+}
+
+/* Horisontell bar - kompakt */
+.pitch-bar-container {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.pitch-bar-labels {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.8);
+  font-weight: 600;
+}
+
+.bar-label-left {
+  color: #ef4444;
+}
+
+.bar-label-center {
+  color: #22c55e;
+}
+
+.bar-label-right {
+  color: #ef4444;
+}
+
+.pitch-bar {
+  position: relative;
+  width: 100%;
+  height: 10px;
+  background: linear-gradient(to right, 
+    #ef4444 0%, 
+    #f97316 20%, 
+    #eab308 35%, 
+    #22c55e 50%, 
+    #eab308 65%, 
+    #f97316 80%, 
+    #ef4444 100%);
+  border-radius: 5px;
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.pitch-bar-track {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  border-radius: 5px;
+}
+
+.pitch-bar-indicator {
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 2px solid white;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  transition: left 0.1s ease-out;
+  z-index: 10;
+}
+
+@media (max-width: 768px) {
+  .pitch-detector-overlay {
+    min-width: 180px;
+    padding: 12px 16px;
+    top: 10px;
+    right: 10px;
+  }
+  
+  .sung-note {
+    font-size: 36px;
+  }
+  
+  .pitch-detector-overlay .target-note {
+    font-size: 12px;
+  }
+  
+  .pitch-info {
+    font-size: 11px;
+    gap: 3px;
+  }
+  
+  .pitch-bar-labels {
+    font-size: 10px;
+  }
+  
+  .pitch-bar {
+    height: 8px;
+  }
+  
+  .pitch-bar-indicator {
+    width: 14px;
+    height: 14px;
+  }
+}
+
+/* Target info and waiting states */
+.target-info {
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 0.75rem;
+  border-radius: 6px;
+  margin-bottom: 0.75rem;
+}
+
+.target-voice {
+  font-size: 0.9rem;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 0.25rem;
+}
+
+.no-target {
+  color: rgba(255, 255, 255, 0.6);
+  font-style: italic;
+  text-align: center;
+  padding: 1rem;
+}
+
+.voice-accuracy {
+  background-color: rgba(255, 255, 255, 0.1);
+  padding: 0.75rem;
+  border-radius: 6px;
+}
+
+.waiting-for-voice {
+  color: rgba(255, 255, 255, 0.6);
+  font-style: italic;
+  text-align: center;
+  padding: 1rem;
+}
+
+/* Latency Control */
+.latency-control {
+  margin-bottom: 1.5rem;
+  padding: 1rem;
+  background-color: #fff3cd;
+  border-radius: 6px;
+  border: 2px solid #ffc107;
+}
+
+.latency-control h4 {
+  margin: 0 0 0.75rem 0;
+  color: #856404;
+  font-size: 1rem;
+}
+
+.latency-control label {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 0.9rem;
+  color: #856404;
+  font-weight: 600;
+}
+
+.latency-control input[type="range"] {
+  width: 100%;
+  height: 6px;
+  background: #ffe69c;
+  border-radius: 3px;
+  outline: none;
+}
+
+.latency-control input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background: #ffc107;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid white;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+.latency-control input[type="range"]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  background: #ffc107;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 2px solid white;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }

@@ -120,8 +120,9 @@ export function detectPitch(
       }
     }
     
-    // Sort by distance to target
-    candidates.sort((a, b) => a.distance - b.distance);
+    // Sort by clarity (highest first), NOT by distance to target
+    // We want the actual sung pitch, not the closest to target
+    candidates.sort((a, b) => b.clarity - a.clarity);
     
     if (candidates.length > 0) {
       frequency = candidates[0].freq;
