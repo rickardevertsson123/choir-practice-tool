@@ -52,9 +52,36 @@ function ScorePlayerPage() {
   }
   const [voiceMatch, setVoiceMatch] = useState<VoiceMatch | null>(null)
   
-  // Selected voice for pitch detection
-  const [selectedVoice, setSelectedVoice] = useState<VoiceId | 'auto'>('auto')
-  const selectedVoiceRef = useRef<VoiceId | 'auto'>('auto')
+  // Current target note (visas alltid när det finns aktiva noter)
+  const [currentTargetNote, setCurrentTargetNote] = useState<{ displayLabel: string; targetMidi: number } | null>(null)
+  
+  // Selected voice for pitch detection (no auto mode)
+  const [selectedVoice, setSelectedVoice] = useState<VoiceId | null>(null)
+  const selectedVoiceRef = useRef<VoiceId | null>(null)
+  
+  // Synkronisera selectedVoiceRef med selectedVoice state och rensa state
+  useEffect(() => {
+    selectedVoiceRef.current = selectedVoice;
+    
+    // Rensa state när stämma byts (endast om mikrofon är aktiv)
+    if (micActive) {
+      setPitchResult({ frequency: null, clarity: 0 });
+      setVoiceMatch(null);
+      setDebugMatchInfo(null);
+      setDebugActiveNotesByVoice(new Map());
+      clearTrail();
+    }
+  }, [selectedVoice, micActive])
+  
+  // Auto-select first human voice when timeline loads
+  useEffect(() => {
+    if (scoreTimeline && !selectedVoice) {
+      const humanVoices = getVoices().filter(v => !v.toLowerCase().includes('keyboard'));
+      if (humanVoices.length > 0) {
+        setSelectedVoice(humanVoices[0]);
+      }
+    }
+  }, [scoreTimeline, selectedVoice])
   
   // Tempo control
   const [tempoMultiplier, setTempoMultiplier] = useState(1.0)
@@ -292,6 +319,12 @@ function ScorePlayerPage() {
             osmdRef.current.cursor.update()
           }
           clearTrail()
+          // Rensa pitch detection state för ny loop
+          setPitchResult({ frequency: null, clarity: 0 })
+          setVoiceMatch(null)
+          setCurrentTargetNote(null)
+          setDebugMatchInfo(null)
+          setDebugActiveNotesByVoice(new Map())
         }
       }
     }
@@ -526,14 +559,20 @@ function ScorePlayerPage() {
         micStreamRef.current = null
       }
       if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
+        clearTimeout(animationFrameRef.current)
       }
       setMicActive(false)
       setPitchResult({ frequency: null, clarity: 0 })
     } else {
       // Starta mikrofon
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          audio: {
+            autoGainControl: false,
+            noiseSuppression: false,
+            echoCancellation: false
+          }
+        })
         micStreamRef.current = stream
         
         // Skapa AudioContext om den inte finns
@@ -568,9 +607,9 @@ function ScorePlayerPage() {
             if (timeline) {
               const nowSeconds = playerRef.current.getCurrentTime();
               
-              // Find active notes
+              // Find active notes from selected voice only
               let candidateNotes = timeline.notes;
-              if (selectedVoiceRef.current !== 'auto') {
+              if (selectedVoiceRef.current) {
                 candidateNotes = candidateNotes.filter(n => n.voice === selectedVoiceRef.current);
               }
               
@@ -584,12 +623,22 @@ function ScorePlayerPage() {
                 const humanNotes = activeNotes.filter(note => !note.voice.toLowerCase().includes('keyboard'));
                 if (humanNotes.length > 0) {
                   targetHint = { targetMidi: humanNotes[0].midiPitch };
+                  const targetFreq = 440 * Math.pow(2, (targetHint.targetMidi - 69) / 12);
+                  const targetNote = (() => {
+                    const noteIndex = targetHint.targetMidi % 12;
+                    const octave = Math.floor(targetHint.targetMidi / 12) - 1;
+                    return ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'][noteIndex] + octave;
+                  })();
+                  // Target hint set for pitch detection
                 }
               }
             }
           }
           
           const result = detectPitch(buffer, audioContextRef.current!.sampleRate, targetHint)
+          
+          // Pitch detection completed
+          
           setPitchResult(result)
           
           if (playerRef.current && playerIsPlaying) {
@@ -606,16 +655,17 @@ function ScorePlayerPage() {
               cursorMeasureIndex: osmdRef.current?.cursor.Iterator.CurrentMeasureIndex || 0
             });
             
-            // Filtrera på voice för debug och trail-ritning
+            // Filtrera på selected voice för debug och trail-ritning
             let candidateNotes = timeline.notes;
-            if (selectedVoiceRef.current !== 'auto') {
+            if (selectedVoiceRef.current) {
               candidateNotes = candidateNotes.filter(n => n.voice === selectedVoiceRef.current);
             }
             
             // Räkna aktiva noter (using SECONDS)
+            const tolerance = 0.05;
             const activeNotes = candidateNotes.filter(note =>
-              nowSeconds >= note.startTimeSeconds &&
-              nowSeconds <= note.startTimeSeconds + note.durationSeconds
+              nowSeconds >= note.startTimeSeconds - tolerance &&
+              nowSeconds <= note.startTimeSeconds + note.durationSeconds + tolerance
             );
             
             setDebugActiveNotes(activeNotes.length);
@@ -626,7 +676,7 @@ function ScorePlayerPage() {
               .slice(0, 10);
             
             const noteIntervals = allNotesSorted.map(note => {
-              const isActive = nowSeconds >= note.startTimeSeconds && nowSeconds <= note.startTimeSeconds + note.durationSeconds;
+              const isActive = nowSeconds >= note.startTimeSeconds - tolerance && nowSeconds <= note.startTimeSeconds + note.durationSeconds + tolerance;
               return {
                 voice: note.voice,
                 displayLabel: buildVoiceDisplayLabel(note.voice, getVoices(), partMetadata),
@@ -637,6 +687,24 @@ function ScorePlayerPage() {
               };
             });
             setDebugNoteIntervals(noteIntervals);
+            
+            // Sätt currentTargetNote baserat på aktiva noter (oavsett om användaren sjunger)
+            
+            if (activeNotes.length > 0 && selectedVoiceRef.current) {
+              const humanNotes = activeNotes.filter(note => !note.voice.toLowerCase().includes('keyboard'));
+              if (humanNotes.length > 0) {
+                const targetNote = humanNotes[0];
+                const displayLabel = buildVoiceDisplayLabel(targetNote.voice, getVoices(), partMetadata);
+                setCurrentTargetNote({
+                  displayLabel,
+                  targetMidi: targetNote.midiPitch
+                });
+              } else {
+                setCurrentTargetNote(null);
+              }
+            } else {
+              setCurrentTargetNote(null);
+            }
             
             // Voice matching om vi har pitch
             if (result.frequency) {
@@ -667,12 +735,15 @@ function ScorePlayerPage() {
               } else {
                 setVoiceMatch(null);
               }
+            } else {
+              setVoiceMatch(null);
             }
           } else {
             setVoiceMatch(null);
           }
           
-          animationFrameRef.current = requestAnimationFrame(detectLoop)
+          // 20 Hz sampling (50ms interval) istället för 60 Hz
+          animationFrameRef.current = setTimeout(detectLoop, 50) as unknown as number
         }
         
         detectLoop()
@@ -749,11 +820,18 @@ function ScorePlayerPage() {
     // STEP 0: Get current time in SECONDS (wall-clock time)
     const nowSeconds = playerRef.current.getCurrentTime();
     
-    // STEP 1: Filter on voice only
-    let candidateNotes = timeline.notes;
-    if (selectedVoiceRef.current !== 'auto') {
-      candidateNotes = candidateNotes.filter(n => n.voice === selectedVoiceRef.current);
+    // STEP 1: Filter on selected voice only (required)
+    if (!selectedVoiceRef.current) {
+      setDebugMatchInfo({ 
+        bestVoice: null, 
+        bestTargetMidi: 0, 
+        bestDistanceCents: 0, 
+        allDistances: [] 
+      });
+      return null;
     }
+    
+    const candidateNotes = timeline.notes.filter(n => n.voice === selectedVoiceRef.current);
     
     // STEP 2: FILTER ON CURRENT TIME (CRITICAL)
     // Use startTimeSeconds and durationSeconds with 50ms tolerance for pauses
@@ -900,7 +978,7 @@ function ScorePlayerPage() {
         micStreamRef.current.getTracks().forEach(track => track.stop())
       }
       if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current)
+        clearTimeout(animationFrameRef.current)
       }
       if (refOscillatorRef.current) {
         refOscillatorRef.current.stop();
@@ -974,14 +1052,13 @@ function ScorePlayerPage() {
             <div className="voice-selection">
               <h4>🎤 Välj stämma att öva</h4>
               <select 
-                value={selectedVoice} 
+                value={selectedVoice || ''} 
                 onChange={(e) => {
-                  const newVoice = e.target.value as VoiceId | 'auto';
+                  const newVoice = e.target.value as VoiceId;
                   setSelectedVoice(newVoice);
-                  selectedVoiceRef.current = newVoice;
                 }}
               >
-                <option value="auto">Auto (alla stämmor)</option>
+                {!selectedVoice && <option value="">Välj stämma...</option>}
                 {getVoices().filter(v => !v.toLowerCase().includes('keyboard')).map(voice => (
                   <option key={voice} value={voice}>
                     {buildVoiceDisplayLabel(voice, getVoices(), partMetadata)}
@@ -1022,43 +1099,51 @@ function ScorePlayerPage() {
             </button>
           </div>
           
-          {/* Voice Matching - visas endast när playback är aktiv */}
+          {/* Voice Matching - visas när playback är aktiv */}
           {micActive && isPlaying && scoreTimeline && (
             <div className="voice-matching">
               <h4>🎵 Stämma-identifikation</h4>
-              {voiceMatch ? (
-                <div className="voice-match-display">
-                  <div className="matched-voice">
-                    Sjunger stämma: <strong>{voiceMatch.displayLabel}</strong> ✅
+              
+              {/* Visa alltid målnot när det finns aktiva noter */}
+              {currentTargetNote ? (
+                <div className="target-info">
+                  <div className="target-voice">
+                    Stämma: <strong>{currentTargetNote.displayLabel}</strong>
                   </div>
                   <div className="target-note">
-                    Målnot: {midiToNoteName(voiceMatch.targetMidi)} (MIDI {voiceMatch.targetMidi})
+                    Målnot: <strong>{midiToNoteName(currentTargetNote.targetMidi)}</strong> (MIDI {currentTargetNote.targetMidi})
                   </div>
+                </div>
+              ) : (
+                <div className="no-target">
+                  🔇 Paus - ingen målton
+                </div>
+              )}
+              
+              {/* Visa avvikelse endast när användaren sjunger */}
+              {voiceMatch && pitchResult.frequency ? (
+                <div className="voice-accuracy">
                   <div className="voice-cents" style={{
                     color: Math.abs(voiceMatch.distanceCents) < 10 ? 'green' : 
                            Math.abs(voiceMatch.distanceCents) < 25 ? 'orange' : 'red'
                   }}>
                     Avvikelse: {voiceMatch.distanceCents > 0 ? '+' : ''}{Math.round(voiceMatch.distanceCents)} cent
                   </div>
-                  <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#666', minHeight: '1.5rem' }}>
-                    {pitchResult.frequency && (() => {
-                      const noteInfo = frequencyToNoteInfo(pitchResult.frequency);
+                  <div style={{ marginTop: '0.5rem', fontSize: '0.9rem', color: '#666' }}>
+                    {(() => {
+                      const noteInfo = frequencyToNoteInfo(pitchResult.frequency!);
                       if (noteInfo) {
                         return `Din ton: ${noteInfo.noteName} (MIDI ${noteInfo.exactMidi.toFixed(2)})`;
                       }
-                      return '\u00A0'; // Non-breaking space as placeholder
+                      return null;
                     })()}
                   </div>
                 </div>
-              ) : (
-                <div className="no-voice-match">
-                  {pitchResult.frequency ? (
-                    debugMatchInfo && debugMatchInfo.bestVoice === null ? 
-                      '🔇 Paus - ingen målton' : 
-                      'Ingen tydlig stämma'
-                  ) : 'Väntar på sång...'}
+              ) : currentTargetNote ? (
+                <div className="waiting-for-voice">
+                  Väntar på sång...
                 </div>
-              )}
+              ) : null}
             </div>
           )}
           

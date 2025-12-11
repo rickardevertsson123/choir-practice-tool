@@ -32,7 +32,7 @@ export function detectPitch(
   // Check if signal has enough energy
   const rms = Math.sqrt(buffer.reduce((sum, val) => sum + val * val, 0) / buffer.length);
   
-  if (rms < 0.005) {
+  if (rms < 0.01) {
     return { frequency: null, clarity: 0 };
   }
 
@@ -45,10 +45,10 @@ export function detectPitch(
     // Convert target MIDI to frequency
     targetFreq = 440 * Math.pow(2, (targetHint.targetMidi - 69) / 12);
     
-    // Search ±3 semitones around target (narrow range for better lock-in)
-    // 3 semitones = 2^(3/12) ≈ 1.189
-    minFreq = targetFreq / 1.189;
-    maxFreq = targetFreq * 1.189;
+    // Search ±3 semitones around target (3 semitones = 2^(3/12) ≈ 1.189)
+    // This prevents octave errors and breathing noise detection
+    minFreq = Math.max(80, targetFreq / 1.189);   // Don't go below 80 Hz
+    maxFreq = Math.min(1000, targetFreq * 1.189); // Don't go above 1000 Hz
   }
   
   const minPeriod = Math.floor(sampleRate / maxFreq);
@@ -92,7 +92,7 @@ export function detectPitch(
   }
   const clarity = sumSquares > 0 ? bestCorrelation / sumSquares : 0;
 
-  // Require minimum clarity threshold
+  // Require minimum clarity threshold (optimized for headset singing)
   if (clarity < 0.4 || bestPeriod === -1) {
     return { frequency: null, clarity };
   }
