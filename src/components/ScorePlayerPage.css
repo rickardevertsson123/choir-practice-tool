@@ -60,6 +60,16 @@
   display: none;
 }
 
+.playhead-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  background: rgba(0, 0, 0, 0.7);
+  pointer-events: none;
+  z-index: 10;
+}
+
 .status-text {
   color: #666;
   font-style: italic;
