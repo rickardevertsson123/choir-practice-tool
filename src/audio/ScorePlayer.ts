@@ -1,4 +1,4 @@
-import { ScoreTimeline, NoteEvent, VoiceId } from '../types/ScoreTimeline';
+import { ScoreTimeline, VoiceId } from '../types/ScoreTimeline';
 
 export interface VoiceMixerSettings {
   volume: number;  // 0.0–1.0
@@ -8,6 +8,7 @@ export interface VoiceMixerSettings {
 
 export interface ScorePlayerOptions {
   audioContext?: AudioContext;
+  masterVolume?: number; // 0..1
 }
 
 export interface PlayerControls {
@@ -22,7 +23,7 @@ export interface PlayerControls {
   getCurrentTime(): number;
   getDuration(): number;
   isPlaying(): boolean;
-  
+
   setTempoMultiplier(multiplier: number): void;
   getTempoMultiplier(): number;
 }
@@ -30,236 +31,197 @@ export interface PlayerControls {
 export function midiToFrequency(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
-0
+
+// --- Click-free synth constants ---
+const ATTACK_SEC = 0.030;      // 30ms (noticeably smooth vs "on/off")
+const RELEASE_SEC = 0.045;     // 45ms
+const PORTAMENTO_SEC = 0.018;  // 18ms freq glide at note transitions
+const REST_GATE_FLOOR = 0.0001;
+
+type MonoNote = {
+  midiPitch: number;
+  startTimeSeconds: number;
+  durationSeconds: number;
+};
+
+class VoiceSynth {
+  osc: OscillatorNode;
+  amp: GainNode;            // per-voice synth envelope (not mixer)
+  started = false;
+
+  constructor(private ctx: AudioContext, connectTo: AudioNode) {
+    this.osc = ctx.createOscillator();
+    this.osc.type = 'sine';
+
+    this.amp = ctx.createGain();
+    this.amp.gain.value = 0; // start silent
+
+    this.osc.connect(this.amp);
+    this.amp.connect(connectTo);
+  }
+
+  start(atTime: number) {
+    if (this.started) return;
+    // Set a safe initial freq so the node is valid before ramps
+    this.osc.frequency.setValueAtTime(220, atTime);
+    this.osc.start(atTime);
+    this.started = true;
+  }
+
+  stop(atTime: number) {
+    if (!this.started) return;
+    try { this.osc.stop(atTime); } catch {}
+    this.started = false;
+  }
+
+  scheduleNote(start: number, end: number, freq: number) {
+    const a = this.amp.gain;
+    const f = this.osc.frequency;
+
+    // Frequency glide into the note (prevents discontinuity clicks)
+    f.cancelScheduledValues(start);
+    // If we don’t know current scheduled value, setTargetAtTime is forgiving
+    f.setTargetAtTime(freq, start, PORTAMENTO_SEC / 3);
+
+    // Envelope: ramp up at start
+    a.cancelScheduledValues(start);
+    a.setValueAtTime(Math.max(a.value, REST_GATE_FLOOR), start);
+    a.setTargetAtTime(1.0, start, ATTACK_SEC / 3);
+
+    // Envelope: ramp down near end
+    const relStart = Math.max(start, end - RELEASE_SEC);
+    a.setValueAtTime(1.0, relStart);
+    a.setTargetAtTime(REST_GATE_FLOOR, relStart, RELEASE_SEC / 3);
+  }
+
+  scheduleRest(start: number) {
+    const a = this.amp.gain;
+    a.cancelScheduledValues(start);
+    a.setValueAtTime(Math.max(a.value, REST_GATE_FLOOR), start);
+    a.setTargetAtTime(REST_GATE_FLOOR, start, RELEASE_SEC / 3);
+  }
+
+  dispose() {
+    try { this.osc.disconnect(); } catch {}
+    try { this.amp.disconnect(); } catch {}
+  }
+}
+
 export class ScorePlayer implements PlayerControls {
   private audioContext: AudioContext;
-  private timeline: ScoreTimeline;
-  private voiceGains = new Map<VoiceId, GainNode>();
-  private voiceSettings = new Map<VoiceId, VoiceMixerSettings>();
+  public timeline: ScoreTimeline;
+
   private masterGain: GainNode;
-  
+  private voiceGains = new Map<VoiceId, GainNode>();         // mixer per voice
+  private voiceSettings = new Map<VoiceId, VoiceMixerSettings>();
+  private voiceSynths = new Map<VoiceId, VoiceSynth>();
+
   private isPlayingState = false;
-  private currentTimeSeconds = 0; // "cursor" i timeline
-  private playStartTime = 0; // audioContext.currentTime när aktuell playback startade
-  private timelineStartOffset = 0; // timeline-positionen där aktuell playback startade
-  private activeOscillators: OscillatorNode[] = [];
-  private tempoMultiplier = 1.0; // 1.0 = normalt tempo, 0.5 = halvt, 2.0 = dubbelt
+  private currentTimeSeconds = 0;
+  private playStartTime = 0;
+  private timelineStartOffset = 0;
+  private tempoMultiplier = 1.0;
 
   constructor(timeline: ScoreTimeline, options?: ScorePlayerOptions) {
     this.timeline = timeline;
-    
-    try {
-      this.audioContext = options?.audioContext || new AudioContext();
-      
-      // Skapa master gain med låg nivå för att undvika distorsion
-      this.masterGain = this.audioContext.createGain();
-      this.masterGain.gain.value = 0.05; // Mycket låg master-nivå
-      this.masterGain.connect(this.audioContext.destination);
-      
-      // Initiera voice gains och settings
-      this.initializeVoices();
-      
-      console.log('ScorePlayer initialiserad med', timeline.notes.length, 'noter');
-    } catch (err) {
-      console.error('Fel vid ScorePlayer konstruktor:', err);
-      throw err;
-    }
+    this.audioContext = options?.audioContext || new AudioContext();
+
+    this.masterGain = this.audioContext.createGain();
+    const masterVol = typeof options?.masterVolume === 'number' ? options.masterVolume : 0.25;
+    this.masterGain.gain.value = Math.max(0, Math.min(1, masterVol));
+    this.masterGain.connect(this.audioContext.destination);
+
+    this.initializeVoices();
+
+    console.log('ScorePlayer initialiserad med', timeline.notes.length, 'noter');
   }
 
   private initializeVoices(): void {
     const voices = new Set(this.timeline.notes.map(note => note.voice));
-    
+
     for (const voice of voices) {
-      // Skapa gain node för denna voice
-      const gainNode = this.audioContext.createGain();
-      gainNode.connect(this.masterGain);
-      this.voiceGains.set(voice, gainNode);
-      
-      // Initiera settings - nu kan vi använda högre värden eftersom master är låg
-      this.voiceSettings.set(voice, {
-        volume: 1.0,  // Full voice-volym inom låg master-nivå
-        muted: false,
-        solo: false
-      });
+      const mixGain = this.audioContext.createGain();
+      mixGain.connect(this.masterGain);
+      this.voiceGains.set(voice, mixGain);
+
+      this.voiceSettings.set(voice, { volume: 1.0, muted: false, solo: false });
+
+      // One continuous synth per voice
+      const synth = new VoiceSynth(this.audioContext, mixGain);
+      this.voiceSynths.set(voice, synth);
     }
+
+    this.updateAllVoiceGains(true);
   }
 
   play(): void {
     if (this.isPlayingState) return;
-    
-    // Resume AudioContext om det behövs
+
     if (this.audioContext.state === 'suspended') {
       this.audioContext.resume();
     }
-    
+
     this.isPlayingState = true;
     this.playStartTime = this.audioContext.currentTime;
     this.timelineStartOffset = this.currentTimeSeconds;
-    
-    this.scheduleNotes();
-  }
 
-  private scheduleNotes(): void {
-    this.stopActiveOscillators();
-
-    const offset = this.timelineStartOffset;
-
-    // Sortera noter i tidsordning
-    const notesToPlay = this.timeline.notes
-      .filter(note => note.startTimeSeconds + note.durationSeconds > offset)
-      .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
-
-    // Debug: kolla keyboard
-    const keyboardNotes = notesToPlay
-      .filter(n => n.voice === "Rehearsal keyboard")
-      .slice(0, 10);
-    console.log("Scheduling Rehearsal keyboard (first 10):", keyboardNotes);
-
-    for (const note of notesToPlay) {
-      const start = note.startTimeSeconds;
-      const end = note.startTimeSeconds + note.durationSeconds;
-
-      // Om noten redan delvis passerat vid offset, starta direkt och korta ned duration
-      let relativeStart = start - offset;
-      let duration = note.durationSeconds;
-
-      if (relativeStart < 0) {
-        duration = end - offset;
-        relativeStart = 0;
-      }
-
-      if (duration <= 0) {
-        continue;
-      }
-
-      // Applicera tempo multiplier
-      const playAt = this.audioContext.currentTime + (relativeStart / this.tempoMultiplier);
-      const adjustedDuration = duration / this.tempoMultiplier;
-
-      const osc = this.audioContext.createOscillator();
-      osc.frequency.value = midiToFrequency(note.midiPitch);
-      osc.type = "sine";
-
-      const voiceGain = this.voiceGains.get(note.voice);
-      if (voiceGain) {
-        osc.connect(voiceGain);
-      }
-
-      osc.start(playAt);
-      osc.stop(playAt + adjustedDuration);
-
-      this.activeOscillators.push(osc);
-    }
+    this.scheduleFromOffset();
   }
 
   pause(): void {
     if (!this.isPlayingState) return;
-    
-    // Spara aktuell tid i timeline
     this.currentTimeSeconds = this.getCurrentTime();
-    
     this.isPlayingState = false;
-    this.stopActiveOscillators();
+
+    // Fade all voices quickly to silence (no click)
+    const t = this.audioContext.currentTime;
+    for (const synth of this.voiceSynths.values()) synth.scheduleRest(t);
   }
 
   stop(): void {
     this.isPlayingState = false;
     this.currentTimeSeconds = 0;
     this.timelineStartOffset = 0;
-    this.stopActiveOscillators();
-  }
 
-  private stopActiveOscillators(): void {
-    for (const osc of this.activeOscillators) {
-      try {
-        osc.stop();
-      } catch (e) {
-        // Oscillator kanske redan stoppats
-      }
-    }
-    this.activeOscillators = [];
+    const t = this.audioContext.currentTime;
+    for (const synth of this.voiceSynths.values()) synth.scheduleRest(t);
   }
 
   seekTo(timeSeconds: number): void {
     const clamped = Math.max(0, Math.min(timeSeconds, this.timeline.totalDurationSeconds));
-    
     this.currentTimeSeconds = clamped;
     this.timelineStartOffset = clamped;
-    
+
     if (this.isPlayingState) {
-      // Hoppa direkt genom att stoppa och spela om från nya positionen
-      this.stopActiveOscillators();
       this.playStartTime = this.audioContext.currentTime;
-      this.scheduleNotes();
+      this.scheduleFromOffset();
     }
+  }
+
+  setTempoMultiplier(multiplier: number): void {
+    const wasPlaying = this.isPlayingState;
+    const current = this.getCurrentTime();
+    if (wasPlaying) this.pause();
+
+    this.tempoMultiplier = Math.max(0.25, Math.min(2.0, multiplier));
+    this.currentTimeSeconds = current;
+
+    if (wasPlaying) this.play();
+  }
+
+  getTempoMultiplier(): number {
+    return this.tempoMultiplier;
   }
 
   setVoiceSettings(voiceId: VoiceId, settings: Partial<VoiceMixerSettings>): void {
     const current = this.voiceSettings.get(voiceId);
     if (!current) return;
-    
-    const updated = { ...current, ...settings };
-    this.voiceSettings.set(voiceId, updated);
-    
-    this.updateAllVoiceGains();
+    this.voiceSettings.set(voiceId, { ...current, ...settings });
+    this.updateAllVoiceGains(false);
   }
 
   getVoiceSettings(voiceId: VoiceId): VoiceMixerSettings {
-    return this.voiceSettings.get(voiceId) || {
-      volume: 1.0,
-      muted: false,
-      solo: false
-    };
-  }
-
-  private updateAllVoiceGains(): void {
-    // Kolla om någon voice har solo
-    const hasSolo = Array.from(this.voiceSettings.values()).some(s => s.solo);
-    
-    for (const [voiceId, gainNode] of this.voiceGains) {
-      const settings = this.voiceSettings.get(voiceId);
-      if (!settings) continue;
-      
-      let gain = 0;
-      
-      if (hasSolo) {
-        // Om solo finns, bara solo-voices ska höras
-        gain = settings.solo ? settings.volume : 0;
-      } else {
-        // Annars: muted ? 0 : volume
-        gain = settings.muted ? 0 : settings.volume;
-      }
-      
-      gainNode.gain.value = gain;
-    }
-  }
-
-  getCurrentTime(): number {
-    if (this.isPlayingState) {
-      const elapsed = this.audioContext.currentTime - this.playStartTime;
-      return this.timelineStartOffset + (elapsed * this.tempoMultiplier);
-    }
-    return this.currentTimeSeconds;
-  }
-  
-  setTempoMultiplier(multiplier: number): void {
-    const wasPlaying = this.isPlayingState;
-    const currentTime = this.getCurrentTime();
-    
-    if (wasPlaying) {
-      this.pause();
-    }
-    
-    this.tempoMultiplier = Math.max(0.25, Math.min(2.0, multiplier));
-    this.currentTimeSeconds = currentTime;
-    
-    if (wasPlaying) {
-      this.play();
-    }
-  }
-  
-  getTempoMultiplier(): number {
-    return this.tempoMultiplier;
+    return this.voiceSettings.get(voiceId) || { volume: 1.0, muted: false, solo: false };
   }
 
   getDuration(): number {
@@ -270,9 +232,123 @@ export class ScorePlayer implements PlayerControls {
     return this.isPlayingState;
   }
 
-  // Cleanup method
+  // Clamp time to duration so UI logic can loop safely
+  getCurrentTime(): number {
+    const dur = this.timeline.totalDurationSeconds;
+    if (this.isPlayingState) {
+      const elapsed = this.audioContext.currentTime - this.playStartTime;
+      const t = this.timelineStartOffset + (elapsed * this.tempoMultiplier);
+      return Math.max(0, Math.min(dur, t));
+    }
+    return Math.max(0, Math.min(dur, this.currentTimeSeconds));
+  }
+
+  private updateAllVoiceGains(isInit = false): void {
+    const hasSolo = Array.from(this.voiceSettings.values()).some(s => s.solo);
+    const t = this.audioContext.currentTime;
+    const ramp = isInit ? 0 : 0.015; // 15ms
+
+    for (const [voiceId, gainNode] of this.voiceGains) {
+      const settings = this.voiceSettings.get(voiceId);
+      if (!settings) continue;
+
+      let g = 0;
+      if (hasSolo) g = settings.solo ? settings.volume : 0;
+      else g = settings.muted ? 0 : settings.volume;
+
+      g = Math.max(0, Math.min(1, g));
+
+      if (ramp > 0) {
+        gainNode.gain.cancelScheduledValues(t);
+        gainNode.gain.setValueAtTime(gainNode.gain.value, t);
+        gainNode.gain.linearRampToValueAtTime(g, t + ramp);
+      } else {
+        gainNode.gain.value = g;
+      }
+    }
+  }
+
+  private getNotesForVoice(voice: VoiceId, offset: number): MonoNote[] {
+    // Sort per voice
+    const notes = this.timeline.notes
+      .filter(n => n.voice === voice)
+      .filter(n => n.startTimeSeconds + n.durationSeconds > offset)
+      .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+
+    // Merge same-pitch contiguous notes to avoid unnecessary envelope drops
+    const merged: MonoNote[] = [];
+    for (const n of notes) {
+      const last = merged[merged.length - 1];
+      if (!last) {
+        merged.push({ midiPitch: n.midiPitch, startTimeSeconds: n.startTimeSeconds, durationSeconds: n.durationSeconds });
+        continue;
+      }
+
+      const lastEnd = last.startTimeSeconds + last.durationSeconds;
+      const gap = n.startTimeSeconds - lastEnd;
+
+      const samePitch = n.midiPitch === last.midiPitch;
+      const close = gap >= -0.010 && gap <= 0.010; // within 10ms
+
+      if (samePitch && close) {
+        const newEnd = Math.max(lastEnd, n.startTimeSeconds + n.durationSeconds);
+        last.durationSeconds = newEnd - last.startTimeSeconds;
+      } else {
+        merged.push({ midiPitch: n.midiPitch, startTimeSeconds: n.startTimeSeconds, durationSeconds: n.durationSeconds });
+      }
+    }
+
+    return merged;
+  }
+
+  private scheduleFromOffset(): void {
+    const offset = this.timelineStartOffset;
+    const now = this.audioContext.currentTime;
+
+    // Start all synth oscillators once (continuous)
+    for (const synth of this.voiceSynths.values()) synth.start(now);
+
+    for (const [voice, synth] of this.voiceSynths.entries()) {
+      const notes = this.getNotesForVoice(voice, offset);
+
+      // If there are no notes left, just stay silent
+      if (notes.length === 0) {
+        synth.scheduleRest(now);
+        continue;
+      }
+
+      for (const note of notes) {
+        const start = note.startTimeSeconds;
+        const end = note.startTimeSeconds + note.durationSeconds;
+
+        // map timeline -> audio time with tempo multiplier
+        let relativeStart = start - offset;
+        let dur = note.durationSeconds;
+
+        if (relativeStart < 0) {
+          dur = end - offset;
+          relativeStart = 0;
+        }
+        if (dur <= 0) continue;
+
+        const playAt = now + (relativeStart / this.tempoMultiplier);
+        const playEnd = playAt + (dur / this.tempoMultiplier);
+
+        const freq = midiToFrequency(note.midiPitch);
+        synth.scheduleNote(playAt, playEnd, freq);
+      }
+    }
+  }
+
   dispose(): void {
     this.stop();
+    const t = this.audioContext.currentTime;
+    for (const synth of this.voiceSynths.values()) {
+      synth.scheduleRest(t);
+      synth.dispose();
+    }
+    this.voiceSynths.clear();
+
     this.audioContext.close();
   }
 }

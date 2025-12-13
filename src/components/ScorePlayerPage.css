@@ -1043,9 +1043,10 @@
 
 /* Graphical Pitch Detector Overlay - Compact Corner Mode */
 .pitch-detector-overlay {
-  position: absolute;
-  top: 20px;
-  right: 20px;
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   background: rgba(0, 0, 0, 0.5);
   padding: 15px 20px;
   border-radius: 12px;

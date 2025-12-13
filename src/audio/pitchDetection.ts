@@ -32,7 +32,7 @@ export function detectPitch(
   // Check if signal has enough energy
   const rms = Math.sqrt(buffer.reduce((sum, val) => sum + val * val, 0) / buffer.length);
   
-  if (rms < 0.01) {
+  if (rms < 0.001) {
     return { frequency: null, clarity: 0 };
   }
 
