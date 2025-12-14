@@ -47,6 +47,12 @@ const state: DetectorState = {
   pendingJumpCount: 0,
 };
 
+export function resetPitchDetectorState() {
+  state.lastStableMidi = null;
+  state.pendingJumpMidi = null;
+  state.pendingJumpCount = 0;
+}
+
 // Helpers
 function midiToFreq(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);

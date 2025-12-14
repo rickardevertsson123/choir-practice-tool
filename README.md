@@ -58,3 +58,6 @@ Projektet är förberett för att byggas vidare med:
 - Notvisning i `#score-container`
 - Kontroller i sidopanelen
 - Ljuduppspelning och synkronisering
+
+## Design
+se filen design.md
