@@ -93,6 +93,12 @@
   overflow-x: hidden;
 }
 
+/* OSMD/SVG ska ligga "under" trail */
+.score-container svg {
+  position: relative;
+  z-index: 1;
+}
+
 .score-container:empty {
   display: flex;
   align-items: center;
@@ -106,7 +112,7 @@
   top: 0;
   left: 0;
   pointer-events: none;
-  z-index: 45;
+  z-index: 5;
 }
 
 .playhead-marker {
@@ -114,7 +120,7 @@
   width: 2px;
   background: rgba(255, 0, 0, 0.8);
   pointer-events: none;
-  z-index: 50;
+  z-index: 10;
   box-shadow: 0 0 4px rgba(255, 0, 0, 0.5);
 }
 

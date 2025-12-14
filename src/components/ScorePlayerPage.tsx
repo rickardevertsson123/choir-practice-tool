@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import JSZip from 'jszip'
 
@@ -11,8 +11,7 @@ import {
 } from '../utils/musicXmlParser'
 
 import { ScorePlayer, VoiceMixerSettings, midiToFrequency } from '../audio/ScorePlayer'
-import { detectPitch, frequencyToNoteInfo, PitchResult } from '../audio/pitchDetection'
-import { PitchDeviationGate } from '../audio/PitchDeviationGate'
+import { detectPitch, frequencyToNoteInfo, PitchResult, TargetHint } from '../audio/pitchDetection'
 
 import './ScorePlayerPage.css'
 
@@ -24,9 +23,20 @@ const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 
 const FFT_SIZE = 4096
 const ANALYSIS_INTERVAL_MS = 50
 
+// Target-window för att välja aktiv note (lite tolerant)
 const ACTIVE_TOLERANCE_SEC = 0.05 // 50ms före/efter
-const MIN_CLARITY = 0.4
-const ATTACK_PHASE_MS = 80 // “lås-fas” efter notbyte
+
+// Vi ritar INTE i början/slutet av en not, för att slippa "rött vid tonbyte"
+const NOTE_EDGE_MARGIN_SEC = 0.08 // 80ms in + 80ms före slut
+
+// Extra attack-window vid target byte: rita inte trail här
+const ATTACK_PHASE_MS = 120
+
+// Trail: under 10 cents ritar vi inget
+const TRAIL_MIN_CENTS = 10
+
+// alpha = absCents/100
+const TRAIL_MAX_CENTS_FOR_FULL = 100
 
 function midiToNoteName(midi: number): string {
   const noteIndex = ((midi % 12) + 12) % 12
@@ -38,21 +48,23 @@ function clamp(v: number, min: number, max: number) {
   return Math.max(min, Math.min(max, v))
 }
 
+type CursorStep = { step: number; musicalTime: number }
+type CursorPos = { step: number; left: number; top: number; height: number }
+
 export default function ScorePlayerPage() {
   /* =========================
-     REFS: DOM / OSMD
+     REFS: DOM / OSMD / PLAYHEAD
   ========================= */
   const scoreContainerRef = useRef<HTMLDivElement>(null)
+  const playheadRef = useRef<HTMLDivElement>(null)
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null)
 
-  // Custom playhead overlay
-  const playheadRef = useRef<HTMLDivElement>(null)
+  const cursorStepsRef = useRef<CursorStep[]>([])
+  const cursorPositionsRef = useRef<CursorPos[]>([])
 
-  // OSMD cursor → musicalTime mapping + cached positions
-  const cursorStepsRef = useRef<Array<{ step: number; musicalTime: number }>>([])
-  const cursorPositionsRef = useRef<Array<{ step: number; left: number; top: number; height: number }>>([])
-  const maxMusicalTimeRef = useRef<number>(0)
-
+  /* =========================
+     REFS: TRAIL CANVAS
+  ========================= */
   const trailCanvasRef = useRef<HTMLCanvasElement>(null)
   const trailCtxRef = useRef<CanvasRenderingContext2D | null>(null)
 
@@ -71,15 +83,14 @@ export default function ScorePlayerPage() {
   const detectTimerRef = useRef<number | null>(null)
 
   /* =========================
-     REFS: PITCH / STABILISERING
+     REFS: PITCH STATE
   ========================= */
   const stableMidiRef = useRef<number | null>(null)
-  const lastTargetMidiRef = useRef<number | null>(null)
-  const targetStartRef = useRef<number | null>(null) // startTimeSeconds för aktuell target
-  const attackUntilRef = useRef<number>(0) // pitchTime (sek) när attack slutar
+  const lastTargetKeyRef = useRef<string | null>(null)
+  const attackUntilPitchTimeRef = useRef<number>(0)
 
-  // Gate: 2 frames, spike-threshold 120 cents (du hade detta)
-  const deviationGateRef = useRef(new PitchDeviationGate(2, 120))
+  const selectedVoiceRef = useRef<VoiceId | null>(null)
+  const latencyMsRef = useRef<number>(0)
 
   /* =========================
      STATE: APP
@@ -98,23 +109,13 @@ export default function ScorePlayerPage() {
   const [voiceSettings, setVoiceSettings] = useState<Record<VoiceId, VoiceMixerSettings>>({})
 
   const [selectedVoice, setSelectedVoice] = useState<VoiceId | null>(null)
-  const selectedVoiceRef = useRef<VoiceId | null>(null)
 
   const [micActive, setMicActive] = useState(false)
   const [pitchResult, setPitchResult] = useState<PitchResult>({ frequency: null, clarity: 0 })
 
-  const [latencyMs, setLatencyMs] = useState(220)
-  const latencyMsRef = useRef(latencyMs)
+  const [latencyMs, setLatencyMs] = useState(0)
 
   const [currentTargetNote, setCurrentTargetNote] = useState<{
-    voice: VoiceId
-    midi: number
-    start: number
-    duration: number
-  } | null>(null)
-
-  // IMPORTANT: use ref for target inside the loop (avoid stale state closure)
-  const currentTargetNoteRef = useRef<{
     voice: VoiceId
     midi: number
     start: number
@@ -134,10 +135,6 @@ export default function ScorePlayerPage() {
     latencyMsRef.current = latencyMs
   }, [latencyMs])
 
-  useEffect(() => {
-    currentTargetNoteRef.current = currentTargetNote
-  }, [currentTargetNote])
-
   /* =========================
      OSMD INIT
   ========================= */
@@ -150,234 +147,67 @@ export default function ScorePlayerPage() {
         followCursor: false,
         drawingParameters: 'compact'
       })
+      // eslint-disable-next-line no-console
+      console.log('OSMD initialiserat')
     } catch (e) {
       console.error(e)
       setError('Kunde inte initiera notvisaren (OSMD).')
     }
   }, [])
 
-  // Build mapping from OSMD cursor steps to screen positions (relative to the scroll container).
-  const buildCursorMaps = () => {
-    const osmd = osmdRef.current
-    const container = scoreContainerRef.current
-    if (!osmd || !container) return
-
-    try {
-      osmd.cursor.show()
-      osmd.cursor.reset()
-
-      const steps: Array<{ step: number; musicalTime: number }> = []
-      let i = 0
-      while (!osmd.cursor.Iterator.EndReached) {
-        const ts = osmd.cursor.Iterator.CurrentSourceTimestamp
-        steps.push({ step: i, musicalTime: ts ? ts.RealValue : 0 })
-        osmd.cursor.next()
-        i++
-        if (i > 20000) break
-      }
-
-      cursorStepsRef.current = steps
-      maxMusicalTimeRef.current = steps.length ? steps[steps.length - 1].musicalTime : 0
-
-      const positions: Array<{ step: number; left: number; top: number; height: number }> = []
-      osmd.cursor.reset()
-
-      const containerRect = container.getBoundingClientRect()
-      for (let s = 0; s < steps.length; s++) {
-        osmd.cursor.update()
-        const el = osmd.cursor.cursorElement as SVGElement | null
-        if (el) {
-          const r = el.getBoundingClientRect()
-          const left = r.left - containerRect.left + container.scrollLeft
-          const top = r.top - containerRect.top + container.scrollTop
-          const height = r.height
-          positions.push({
-            step: s,
-            left: Math.max(0, left),
-            top: Math.max(0, top),
-            height: Math.max(0, height)
-          })
-        } else {
-          positions.push({ step: s, left: 0, top: 0, height: 0 })
-        }
-
-        if (!osmd.cursor.Iterator.EndReached) {
-          osmd.cursor.next()
-        }
-      }
-
-      cursorPositionsRef.current = positions
-      osmd.cursor.hide()
-    } catch (err) {
-      console.warn('buildCursorMaps failed:', err)
-    }
-  }
-
-  const updatePlayheadPosition = () => {
-    const p = playerRef.current
-    const tl = timelineRef.current
-    const container = scoreContainerRef.current
-    const playhead = playheadRef.current
-    if (!p || !tl || !container || !playhead) return
-    if (!cursorStepsRef.current.length || !cursorPositionsRef.current.length) return
-
-    const tSec = p.getCurrentTime()
-
-    let musicalTime = (tSec * tl.tempoBpm) / 240
-    musicalTime = clamp(musicalTime, 0, maxMusicalTimeRef.current || 0)
-
-    const steps = cursorStepsRef.current
-    let idx = 0
-    for (let i = 0; i < steps.length; i++) {
-      if (steps[i].musicalTime <= musicalTime) idx = i
-      else break
-    }
-
-    const posA = cursorPositionsRef.current[idx]
-    const stepA = steps[idx]
-    const stepB = steps[idx + 1]
-    const posB = cursorPositionsRef.current[idx + 1]
-
-    let left = posA?.left ?? 0
-    let top = posA?.top ?? 0
-    let height = posA?.height ?? 0
-
-    if (stepA && stepB && posB && stepB.musicalTime > stepA.musicalTime) {
-      const prog = (musicalTime - stepA.musicalTime) / (stepB.musicalTime - stepA.musicalTime)
-      left = (posA?.left ?? 0) + ((posB.left ?? 0) - (posA?.left ?? 0)) * clamp(prog, 0, 1)
-      top = posA?.top ?? top
-      height = posA?.height ?? height
-    }
-
-    playhead.style.left = `${left}px`
-    playhead.style.top = `${top}px`
-    playhead.style.height = `${Math.max(10, height)}px`
-
-    const viewTop = container.scrollTop
-    const viewBottom = viewTop + container.clientHeight
-    const marginTop = 120
-    const marginBottom = 200
-
-    if (top < viewTop + marginTop) {
-      container.scrollTop = Math.max(0, top - marginTop)
-    } else if (top + height > viewBottom - marginBottom) {
-      container.scrollTop = Math.max(0, top + height - (container.clientHeight - marginBottom))
-    }
-  }
-
-  useEffect(() => {
-    let raf = 0
-    const tick = () => {
-      const p = playerRef.current
-      if (p && p.isPlaying()) updatePlayheadPosition()
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scoreTimeline])
-
-  useEffect(() => {
-    if (!scoreTimeline) return
-    const container = scoreContainerRef.current
-    if (!container) return
-
-    let t: number | null = null
-    const schedule = () => {
-      if (t != null) window.clearTimeout(t)
-      t = window.setTimeout(() => buildCursorMaps(), 120)
-    }
-
-    const ro = new ResizeObserver(schedule)
-    ro.observe(container)
-    window.addEventListener('resize', schedule)
-    schedule()
-
-    return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', schedule)
-      if (t != null) window.clearTimeout(t)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scoreTimeline])
-
   /* =========================
-     CANVAS INIT
+     TRAIL CANVAS HELPERS
   ========================= */
-  const resizeTrailCanvas = () => {
+  function ensureTrailCanvasSize() {
     const canvas = trailCanvasRef.current
     const container = scoreContainerRef.current
     if (!canvas || !container) return
 
-    const cssW = Math.max(1, container.scrollWidth)
-    const cssH = Math.max(1, container.scrollHeight)
+    // Canvas måste matcha scroll-ytan (inte bara viewport)
+    const w = Math.max(1, container.scrollWidth)
+    const h = Math.max(1, container.scrollHeight)
 
-    const dpr = window.devicePixelRatio || 1
-    canvas.style.width = `${cssW}px`
-    canvas.style.height = `${cssH}px`
-    canvas.width = Math.round(cssW * dpr)
-    canvas.height = Math.round(cssH * dpr)
+    if (canvas.width !== w) canvas.width = w
+    if (canvas.height !== h) canvas.height = h
 
-    const ctx = canvas.getContext('2d')
-    if (ctx) {
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
-      trailCtxRef.current = ctx
+    // CSS storlek också (för att undvika stretch)
+    canvas.style.width = `${w}px`
+    canvas.style.height = `${h}px`
+
+    if (!trailCtxRef.current) {
+      trailCtxRef.current = canvas.getContext('2d')
     }
   }
-
-  useEffect(() => {
-    resizeTrailCanvas()
-
-    const container = scoreContainerRef.current
-    if (!container) return
-
-    let t: number | null = null
-    const schedule = () => {
-      if (t != null) window.clearTimeout(t)
-      t = window.setTimeout(() => {
-        resizeTrailCanvas()
-      }, 80)
-    }
-
-    const ro = new ResizeObserver(schedule)
-    ro.observe(container)
-    window.addEventListener('resize', schedule)
-
-    return () => {
-      ro.disconnect()
-      window.removeEventListener('resize', schedule)
-      if (t != null) window.clearTimeout(t)
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scoreTimeline])
 
   function clearTrail() {
     const ctx = trailCtxRef.current
     const canvas = trailCanvasRef.current
     if (!ctx || !canvas) return
-    ctx.save()
-    ctx.setTransform(1, 0, 0, 1, 0, 0)
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.restore()
   }
 
-  function drawTrailMark(absCents: number) {
+  function drawTrailAtPlayhead(absCents: number) {
     const ctx = trailCtxRef.current
+    const canvas = trailCanvasRef.current
     const playhead = playheadRef.current
-    if (!ctx || !playhead) return
+    if (!ctx || !canvas || !playhead) return
 
-    if (!Number.isFinite(absCents)) return
-    if (absCents < 10) return
+    if (absCents < TRAIL_MIN_CENTS) return
 
-    const alpha = clamp(absCents / 100, 0, 1)
-    ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`
+    // alpha = absCents/100
+    const alpha = clamp(absCents / TRAIL_MAX_CENTS_FOR_FULL, 0, 1)
+    if (alpha < 0.1) return
 
-    const x = parseFloat(playhead.style.left || '0')
-    const y = parseFloat(playhead.style.top || '0')
-    const h = parseFloat(playhead.style.height || '0') || 40
+    // Läs playhead position (pixel i container-content coords)
+    const left = parseFloat(playhead.style.left || '0')
+    const top = parseFloat(playhead.style.top || '0')
+    const height = parseFloat(playhead.style.height || '0') || 20
+
+    // RÖD stapel: tjocklek 6px
     const w = 6
 
-    ctx.fillRect(x, y, w, h)
+    ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`
+    ctx.fillRect(left, top, w, height)
   }
 
   /* =========================
@@ -397,7 +227,12 @@ export default function ScorePlayerPage() {
       await osmdRef.current.load(xmlContent)
       await osmdRef.current.render()
 
-      buildCursorMaps()
+      // Bygg cursor mapping (musical time per cursor-step)
+      buildCursorSteps()
+
+      // Bygg position-cache för cursor (pixel-position per step)
+      // (måste ske efter render)
+      buildCursorPositionCache()
 
       const metadata = extractPartMetadata(xmlContent)
       setPartMetadata(metadata)
@@ -406,13 +241,24 @@ export default function ScorePlayerPage() {
       timelineRef.current = timeline
       setScoreTimeline(timeline)
       setCurrentTime(0)
+      setIsPlaying(false)
 
+      // trail canvas
+      ensureTrailCanvasSize()
       clearTrail()
 
+      // auto-select första human voice
       const voices = Array.from(new Set(timeline.notes.map(n => n.voice))).filter(
         v => !v.toLowerCase().includes('keyboard')
       )
       if (!selectedVoice && voices.length) setSelectedVoice(voices[0])
+
+      // reset target/pitch
+      setCurrentTargetNote(null)
+      setDistanceCents(null)
+      stableMidiRef.current = null
+      lastTargetKeyRef.current = null
+      attackUntilPitchTimeRef.current = 0
     } catch (err: any) {
       console.error(err)
       setError(`Kunde inte ladda filen: ${err?.message ?? 'Okänt fel'}`)
@@ -428,6 +274,7 @@ export default function ScorePlayerPage() {
 
     const zip = await JSZip.loadAsync(await file.arrayBuffer())
 
+    // försök container.xml
     const container = zip.file('META-INF/container.xml')
     if (container) {
       const containerXml = await container.async('text')
@@ -440,6 +287,7 @@ export default function ScorePlayerPage() {
       }
     }
 
+    // fallback
     const xmlFile =
       zip.file('score.xml') ||
       Object.values(zip.files).find(
@@ -447,6 +295,77 @@ export default function ScorePlayerPage() {
       )
     if (!xmlFile) throw new Error('Ingen XML-fil hittades i MXL-arkivet')
     return xmlFile.async('text')
+  }
+
+  /* =========================
+     OSMD CURSOR MAPPING + POSITION CACHE
+  ========================= */
+  function buildCursorSteps() {
+    const osmd = osmdRef.current
+    if (!osmd) return
+
+    const steps: CursorStep[] = []
+    osmd.cursor.show()
+    osmd.cursor.reset()
+
+    let i = 0
+    while (!osmd.cursor.Iterator.EndReached) {
+      const ts = osmd.cursor.Iterator.CurrentSourceTimestamp
+      steps.push({
+        step: i,
+        musicalTime: ts ? ts.RealValue : 0
+      })
+      osmd.cursor.next()
+      i++
+    }
+
+    cursorStepsRef.current = steps
+    osmd.cursor.reset()
+    osmd.cursor.update()
+
+    // eslint-disable-next-line no-console
+    console.log(`Cursor mapping: ${steps.length} steps, max musicalTime=${steps[steps.length - 1]?.musicalTime ?? 0}`)
+  }
+
+  function buildCursorPositionCache() {
+    const osmd = osmdRef.current
+    const container = scoreContainerRef.current
+    if (!osmd || !container) return
+    if (cursorStepsRef.current.length === 0) return
+
+    const positions: CursorPos[] = []
+
+    osmd.cursor.reset()
+    osmd.cursor.update()
+
+    for (let i = 0; i < cursorStepsRef.current.length; i++) {
+      const cursorEl = osmd.cursor.cursorElement
+      if (cursorEl) {
+        const cursorRect = cursorEl.getBoundingClientRect()
+        const containerRect = container.getBoundingClientRect()
+
+        // content coords = viewport coords + scroll offset - container viewport origin
+        const left = cursorRect.left - containerRect.left + container.scrollLeft
+        const top = cursorRect.top - containerRect.top + container.scrollTop
+        const height = cursorRect.height
+
+        positions.push({ step: i, left, top, height })
+      }
+
+      if (!osmd.cursor.Iterator.EndReached) {
+        osmd.cursor.next()
+        osmd.cursor.update()
+      }
+    }
+
+    osmd.cursor.reset()
+    osmd.cursor.update()
+
+    cursorPositionsRef.current = positions
+    ensureTrailCanvasSize()
+
+    // eslint-disable-next-line no-console
+    console.log(`Position-cache byggd: ${positions.length} positioner`)
   }
 
   /* =========================
@@ -461,15 +380,21 @@ export default function ScorePlayerPage() {
     }
 
     try {
-      playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata })
+      // ScorePlayer ignorerar extra props om din ctor inte tar partMetadata
+      playerRef.current = new ScorePlayer(scoreTimeline as any, { partMetadata } as any)
       timelineRef.current = scoreTimeline
 
+      // init voice settings
       const initialSettings: Record<VoiceId, VoiceMixerSettings> = {}
       const voices = Array.from(new Set(scoreTimeline.notes.map(n => n.voice)))
       for (const v of voices) {
         initialSettings[v] = playerRef.current.getVoiceSettings(v)
       }
       setVoiceSettings(initialSettings)
+
+      // reset marker/trail
+      ensureTrailCanvasSize()
+      clearTrail()
     } catch (err) {
       console.error(err)
       setError('Kunde inte skapa ljudspelare')
@@ -484,7 +409,7 @@ export default function ScorePlayerPage() {
   }, [scoreTimeline, partMetadata])
 
   /* =========================
-     PLAYER TIME TICK
+     PLAYER TIME TICK + AUTO-LOOP
   ========================= */
   useEffect(() => {
     if (!scoreTimeline) return
@@ -492,12 +417,124 @@ export default function ScorePlayerPage() {
     const id = window.setInterval(() => {
       const p = playerRef.current
       if (!p) return
+
       const t = p.getCurrentTime()
       setCurrentTime(t)
       setIsPlaying(p.isPlaying())
+
+      // auto-loop
+      const dur = scoreTimeline.totalDurationSeconds
+      if (p.isPlaying() && t >= dur - 0.05) {
+        p.seekTo(0)
+        p.play()
+
+        // reset osmd cursor + caches align ok
+        osmdRef.current?.cursor.reset()
+        osmdRef.current?.cursor.update()
+
+        clearTrail()
+        setCurrentTargetNote(null)
+        setDistanceCents(null)
+        stableMidiRef.current = null
+        lastTargetKeyRef.current = null
+        attackUntilPitchTimeRef.current = 0
+      }
     }, 100)
 
     return () => window.clearInterval(id)
+  }, [scoreTimeline])
+
+  /* =========================
+     PLAYHEAD ANIMATION (OSMD cursor mapping -> pixel position)
+  ========================= */
+  useEffect(() => {
+    if (!scoreTimeline) return
+    if (!playerRef.current || !osmdRef.current) return
+
+    let raf = 0
+    let lastStep = -1
+
+    const update = () => {
+      const player = playerRef.current
+      const playhead = playheadRef.current
+      const container = scoreContainerRef.current
+      const steps = cursorStepsRef.current
+      const posCache = cursorPositionsRef.current
+
+      if (!player || !playhead || !container || steps.length === 0 || posCache.length === 0) {
+        raf = requestAnimationFrame(update)
+        return
+      }
+
+      if (player.isPlaying()) {
+        const t = player.getCurrentTime()
+        const tempoBpm = scoreTimeline.tempoBpm
+
+        // wall-clock sec -> musical time (whole fractions)
+        let musicalTime = (t * tempoBpm) / 240
+        const maxMusical = steps[steps.length - 1]?.musicalTime ?? 0
+        musicalTime = clamp(musicalTime, 0, maxMusical)
+
+        // hitta step index
+        let idx = 0
+        for (let i = 0; i < steps.length; i++) {
+          if (steps[i].musicalTime <= musicalTime) idx = i
+          else break
+        }
+
+        const step = steps[idx]?.step ?? 0
+
+        // flytta OSMD cursor ibland (för att hålla den "synkad")
+        if (step !== lastStep) {
+          const osmd = osmdRef.current
+          if (osmd) {
+            osmd.cursor.reset()
+            for (let i = 0; i < step; i++) {
+              if (osmd.cursor.Iterator.EndReached) break
+              osmd.cursor.next()
+            }
+            osmd.cursor.update()
+          }
+          lastStep = step
+        }
+
+        // interpolera pixel mellan posCache[idx] och posCache[idx+1]
+        const cur = steps[idx]
+        const nxt = steps[idx + 1]
+        const curPos = posCache[idx]
+        const nxtPos = posCache[idx + 1]
+
+        if (cur && nxt && curPos && nxtPos && nxt.musicalTime > cur.musicalTime) {
+          const prog = (musicalTime - cur.musicalTime) / (nxt.musicalTime - cur.musicalTime)
+          const left = curPos.left + (nxtPos.left - curPos.left) * prog
+          playhead.style.left = `${left}px`
+          playhead.style.top = `${curPos.top}px`
+          playhead.style.height = `${curPos.height}px`
+        } else if (curPos) {
+          playhead.style.left = `${curPos.left}px`
+          playhead.style.top = `${curPos.top}px`
+          playhead.style.height = `${curPos.height}px`
+        }
+
+        // Auto-scroll: håll playhead inom viewport
+        const phTop = parseFloat(playhead.style.top || '0')
+        const viewTop = container.scrollTop
+        const viewH = container.clientHeight
+        const marginBottom = 180
+        const marginTop = 80
+
+        if (phTop > viewTop + viewH - marginBottom) {
+          container.scrollTop = Math.max(0, phTop - viewH / 2)
+        } else if (phTop < viewTop + marginTop) {
+          container.scrollTop = Math.max(0, phTop - marginTop)
+        }
+      }
+
+      raf = requestAnimationFrame(update)
+    }
+
+    raf = requestAnimationFrame(update)
+    return () => cancelAnimationFrame(raf)
   }, [scoreTimeline])
 
   /* =========================
@@ -506,11 +543,12 @@ export default function ScorePlayerPage() {
   function handlePlayPause() {
     const p = playerRef.current
     if (!p) return
-    if (p.isPlaying()) p.pause()
-    else {
-      if (!cursorStepsRef.current.length || !cursorPositionsRef.current.length) {
-        buildCursorMaps()
-      }
+
+    if (p.isPlaying()) {
+      p.pause()
+    } else {
+      // sync canvas size once when starting
+      ensureTrailCanvasSize()
       p.play()
     }
   }
@@ -522,14 +560,15 @@ export default function ScorePlayerPage() {
     setCurrentTime(0)
     setIsPlaying(false)
 
-    setCurrentTargetNote(null)
-    currentTargetNoteRef.current = null
+    osmdRef.current?.cursor.reset()
+    osmdRef.current?.cursor.update()
 
+    // reset pitch-related
+    setCurrentTargetNote(null)
     setDistanceCents(null)
     stableMidiRef.current = null
-    lastTargetMidiRef.current = null
-    targetStartRef.current = null
-    attackUntilRef.current = 0
+    lastTargetKeyRef.current = null
+    attackUntilPitchTimeRef.current = 0
 
     clearTrail()
   }
@@ -540,7 +579,6 @@ export default function ScorePlayerPage() {
     const p = playerRef.current
     if (!p) return
     p.seekTo(t)
-    updatePlayheadPosition()
   }
 
   function handleTempoChange(mult: number) {
@@ -548,7 +586,6 @@ export default function ScorePlayerPage() {
     const p = playerRef.current
     if (!p || !scoreTimeline) return
     p.setTempoMultiplier(mult)
-    updatePlayheadPosition()
   }
 
   function getVoices(): VoiceId[] {
@@ -600,6 +637,7 @@ export default function ScorePlayerPage() {
 
       setMicActive(true)
 
+      // reset pitch state
       setPitchResult({ frequency: null, clarity: 0 })
       setDistanceCents(null)
       stableMidiRef.current = null
@@ -625,7 +663,51 @@ export default function ScorePlayerPage() {
   }
 
   /* =========================
-     PITCH LOOP + MATCHING
+     TARGET PICKER (max 2 candidates scenario)
+  ========================= */
+  function pickTargetAtTime(timeline: ScoreTimeline, voice: VoiceId, pitchTime: number) {
+    const notes = timeline.notes.filter(n => n.voice === voice)
+
+    // candidates in tolerant window
+    const candidates = notes.filter(
+      n =>
+        pitchTime >= n.startTimeSeconds - ACTIVE_TOLERANCE_SEC &&
+        pitchTime <= n.startTimeSeconds + n.durationSeconds + ACTIVE_TOLERANCE_SEC
+    )
+
+    if (candidates.length === 0) return null
+
+    // Prefer a note where pitchTime is inside strict interval excluding edge margins
+    const strict = candidates.filter(n => {
+      const s = n.startTimeSeconds + NOTE_EDGE_MARGIN_SEC
+      const e = n.startTimeSeconds + n.durationSeconds - NOTE_EDGE_MARGIN_SEC
+      return pitchTime >= s && pitchTime <= e
+    })
+
+    const pool = strict.length > 0 ? strict : candidates
+
+    // Pick the note whose center is closest (helps when 2 overlap)
+    let best = pool[0]
+    let bestDist = Infinity
+    for (const n of pool) {
+      const center = n.startTimeSeconds + n.durationSeconds / 2
+      const d = Math.abs(center - pitchTime)
+      if (d < bestDist) {
+        bestDist = d
+        best = n
+      }
+    }
+
+    return {
+      voice,
+      midi: best.midiPitch,
+      start: best.startTimeSeconds,
+      duration: best.durationSeconds
+    }
+  }
+
+  /* =========================
+     PITCH LOOP
   ========================= */
   function startDetectLoop() {
     const loop = () => {
@@ -633,6 +715,7 @@ export default function ScorePlayerPage() {
       const ctx = audioContextRef.current
       const timeline = timelineRef.current
       const player = playerRef.current
+      const voice = selectedVoiceRef.current
 
       if (!analyser || !ctx) {
         detectTimerRef.current = window.setTimeout(loop, ANALYSIS_INTERVAL_MS)
@@ -642,124 +725,86 @@ export default function ScorePlayerPage() {
       const buffer = new Float32Array(analyser.fftSize)
       analyser.getFloatTimeDomainData(buffer)
 
+      // window timing
       const sr = ctx.sampleRate
       const windowSec = analyser.fftSize / sr
       const halfWindowSec = windowSec / 2
 
+      // pitchTime: align mic-window center with playback time minus latency
       const rawNow = player?.getCurrentTime() ?? 0
       const correctedNow = rawNow - (latencyMsRef.current || 0) / 1000
       const pitchTime = correctedNow - halfWindowSec
 
-      const voice = selectedVoiceRef.current
+      // choose target note
       let targetMidi: number | null = null
-      let targetStart: number | null = null
-      let targetDuration: number | null = null
+      let targetKey: string | null = null
+      let targetForUi: typeof currentTargetNote | null = null
 
       if (timeline && voice) {
-        const notes = timeline.notes.filter(n => n.voice === voice)
-
-        const active = notes.find(
-          n =>
-            pitchTime >= n.startTimeSeconds - ACTIVE_TOLERANCE_SEC &&
-            pitchTime <= n.startTimeSeconds + n.durationSeconds + ACTIVE_TOLERANCE_SEC
-        )
-
-        if (active) {
-          targetMidi = active.midiPitch
-          targetStart = active.startTimeSeconds
-          targetDuration = active.durationSeconds
-
-          const prevTarget = currentTargetNoteRef.current
-          const changed = !prevTarget || prevTarget.midi !== targetMidi || prevTarget.start !== targetStart
-
-          if (changed) {
-            const newTarget = { voice, midi: targetMidi, start: targetStart, duration: targetDuration }
-            currentTargetNoteRef.current = newTarget
-            setCurrentTargetNote(newTarget)
-
-            targetStartRef.current = targetStart
-            stableMidiRef.current = null
-
-            attackUntilRef.current = pitchTime + ATTACK_PHASE_MS / 1000
-            lastTargetMidiRef.current = targetMidi
-          }
-        } else {
-          setCurrentTargetNote(null)
-          currentTargetNoteRef.current = null
-          targetStartRef.current = null
-          lastTargetMidiRef.current = null
-          stableMidiRef.current = null
-          setDistanceCents(null)
+        const t = pickTargetAtTime(timeline, voice, pitchTime)
+        if (t) {
+          targetMidi = t.midi
+          targetForUi = t
+          targetKey = `${t.voice}|${t.start.toFixed(3)}|${t.midi}`
         }
       }
 
-      const result = detectPitch(buffer, sr, targetMidi != null ? { targetMidi } : undefined)
+      // Update UI target + attack window on target change
+      if (targetForUi && targetKey) {
+        if (lastTargetKeyRef.current !== targetKey) {
+          lastTargetKeyRef.current = targetKey
+          setCurrentTargetNote(targetForUi)
+
+          // reset smoothing so we don't "drag" old note into new note
+          stableMidiRef.current = null
+
+          // set attack window (no trail drawing)
+          attackUntilPitchTimeRef.current = pitchTime + ATTACK_PHASE_MS / 1000
+        }
+      } else {
+        lastTargetKeyRef.current = null
+        setCurrentTargetNote(null)
+        stableMidiRef.current = null
+        setDistanceCents(null)
+      }
+
+      // Detect pitch (target-aware)
+      const hint: TargetHint | undefined = targetMidi != null ? ({ targetMidi } as TargetHint) : undefined
+      const result = detectPitch(buffer, sr, hint)
       setPitchResult(result)
 
-      // ==== CENTS + TRAIL ====
-      // ==== CENTS + TRAIL ====
+      // Compute cents deviation
       if (result.frequency && targetMidi != null) {
         const noteInfo = frequencyToNoteInfo(result.frequency)
         if (noteInfo) {
           const rawMidi = noteInfo.exactMidi
 
-          // lätt stabilisering (bara lite)
+          // Fast EMA for stability but still responsive
           const prev = stableMidiRef.current
-          const stable = prev == null ? rawMidi : prev * 0.85 + rawMidi * 0.15
+          const stable = prev == null ? rawMidi : prev * 0.65 + rawMidi * 0.35
           stableMidiRef.current = stable
 
-          // RÅA cents (det här är det vi vill VISA i UI)
-          const centsRaw =
-            1200 * Math.log2(midiToFrequency(stable) / midiToFrequency(targetMidi))
+          const cents = 1200 * Math.log2(midiToFrequency(stable) / midiToFrequency(targetMidi))
+          setDistanceCents(cents)
 
-          // Visa alltid råa cents (inga gates som kan "förlåta" allt)
-          setDistanceCents(centsRaw)
+          // Draw trail only if:
+          // - not in attack window
+          // - and we are not within note edge margin
+          const inAttack = pitchTime < attackUntilPitchTimeRef.current
 
-          // Trail: ignorera attack + kräver clarity
-          const inAttack = pitchTime < attackUntilRef.current
-          if (!inAttack && result.clarity >= MIN_CLARITY) {
-            const abs = Math.abs(centsRaw)
+          // Also: ensure pitchTime is not close to the target note's edges
+          let nearEdge = false
+          if (targetForUi) {
+            const s = targetForUi.start
+            const e = targetForUi.start + targetForUi.duration
+            nearEdge =
+              Math.abs(pitchTime - s) < NOTE_EDGE_MARGIN_SEC ||
+              Math.abs(pitchTime - e) < NOTE_EDGE_MARGIN_SEC
+          }
 
-            // Enkel spike-filter för ritning:
-            // - kräver 2 mätningar i rad om abs hoppar "för mycket" på en frame
-            // - annars rita direkt
-            // (vi håller state i refs)
-            const lastAbsRef = (startDetectLoop as any)._lastAbsRef ?? { current: 0 }
-            const spikeRef = (startDetectLoop as any)._spikeRef ?? { pending: 0, count: 0 }
-            ;(startDetectLoop as any)._lastAbsRef = lastAbsRef
-            ;(startDetectLoop as any)._spikeRef = spikeRef
-
-            const lastAbs = lastAbsRef.current || 0
-            const jump = Math.abs(abs - lastAbs)
-
-            // tröskel: "orimligt stort hopp" (justera gärna)
-            const JUMP_CENTS = 120
-
-            if (jump > JUMP_CENTS) {
-              // kandidat-spike: kräver bekräftelse
-              if (spikeRef.pending === 0 || Math.abs(spikeRef.pending - abs) > 30) {
-                spikeRef.pending = abs
-                spikeRef.count = 1
-              } else {
-                spikeRef.count += 1
-              }
-
-              // bekräftad i 2 frames -> acceptera och rita
-              if (spikeRef.count >= 2) {
-                lastAbsRef.current = abs
-                spikeRef.pending = 0
-                spikeRef.count = 0
-                drawTrailMark(abs)
-              } else {
-                // ignorera denna frame (rita inget)
-              }
-            } else {
-              // normal uppdatering
-              spikeRef.pending = 0
-              spikeRef.count = 0
-              lastAbsRef.current = abs
-              drawTrailMark(abs)
-            }
+          if (!inAttack && !nearEdge && Number.isFinite(cents)) {
+            ensureTrailCanvasSize()
+            drawTrailAtPlayhead(Math.abs(cents))
           }
         } else {
           setDistanceCents(null)
@@ -775,6 +820,36 @@ export default function ScorePlayerPage() {
   }
 
   /* =========================
+     CANVAS RESIZE ON SCROLL/RESIZE
+  ========================= */
+  useEffect(() => {
+    const container = scoreContainerRef.current
+    if (!container) return
+
+    const onScroll = () => {
+      // canvas ligger i content-coords, så den följer scroll.
+      // Men om OSMD reflowar kan scrollWidth/Height ändras.
+      ensureTrailCanvasSize()
+    }
+
+    const onResize = () => {
+      // OSMD kan reflowa system -> rebuild caches
+      ensureTrailCanvasSize()
+      buildCursorSteps()
+      buildCursorPositionCache()
+    }
+
+    container.addEventListener('scroll', onScroll)
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      container.removeEventListener('scroll', onScroll)
+      window.removeEventListener('resize', onResize)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scoreTimeline])
+
+  /* =========================
      CLEANUP
   ========================= */
   useEffect(() => {
@@ -787,10 +862,16 @@ export default function ScorePlayerPage() {
   }, [])
 
   /* =========================
+     DERIVED
+  ========================= */
+  const voicesHuman = useMemo(() => {
+    return getVoices().filter(v => !v.toLowerCase().includes('keyboard'))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scoreTimeline, partMetadata])
+
+  /* =========================
      RENDER
   ========================= */
-  const voicesHuman = getVoices().filter(v => !v.toLowerCase().includes('keyboard'))
-
   return (
     <div className="score-player-page">
       <header className="top-bar">
@@ -815,11 +896,17 @@ export default function ScorePlayerPage() {
           </div>
 
           <div ref={scoreContainerRef} id="score-container" className="score-container">
+            {!scoreTimeline && <p>Välj en MusicXML- eller MXL-fil för att visa noter</p>}
+
             {scoreTimeline && (
               <>
+                {/* trail overlay */}
                 <canvas ref={trailCanvasRef} className="trail-canvas" />
+
+                {/* playhead */}
                 <div ref={playheadRef} className="playhead-marker" />
 
+                {/* overlay pitch info */}
                 {micActive && isPlaying && currentTargetNote && (
                   <div className="pitch-detector-overlay">
                     <div className="pitch-detector-content">
@@ -828,7 +915,11 @@ export default function ScorePlayerPage() {
                           ? frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---'
                           : '---'}
                       </div>
-                      <div className="target-note">Mål: {midiToNoteName(currentTargetNote.midi)}</div>
+
+                      <div className="target-note">
+                        Mål: {midiToNoteName(currentTargetNote.midi)}
+                      </div>
+
                       <div className="pitch-info">
                         <span className="pitch-hz">
                           {pitchResult.frequency ? `${pitchResult.frequency.toFixed(1)} Hz` : '--- Hz'}
@@ -848,16 +939,28 @@ export default function ScorePlayerPage() {
               </>
             )}
           </div>
+
+          {scoreTimeline && (
+            <div className="timeline-debug">
+              <h4>Debug-info:</h4>
+              <p>Antal noter: {scoreTimeline.notes.length}</p>
+              <p>Total längd: {scoreTimeline.totalDurationSeconds.toFixed(1)} sekunder</p>
+              <p>Tempo: {scoreTimeline.tempoBpm} bpm</p>
+            </div>
+          )}
         </div>
 
         <aside className="control-panel">
           <h3>Kontroller</h3>
 
-          {scoreTimeline && (
+          {scoreTimeline ? (
             <>
               <div className="voice-selection">
                 <h4>🎤 Välj stämma att öva</h4>
-                <select value={selectedVoice || ''} onChange={e => setSelectedVoice(e.target.value as VoiceId)}>
+                <select
+                  value={selectedVoice || ''}
+                  onChange={e => setSelectedVoice(e.target.value as VoiceId)}
+                >
                   {!selectedVoice && <option value="">Välj stämma...</option>}
                   {voicesHuman.map(v => (
                     <option key={v} value={v}>
@@ -867,8 +970,9 @@ export default function ScorePlayerPage() {
                 </select>
               </div>
 
-              <div className="player-controls" style={{ marginTop: 16 }}>
-                <h4>Spelare</h4>
+              <div className="player-controls">
+                <h3>Spelare</h3>
+
                 <div className="transport-controls">
                   <button onClick={handlePlayPause}>{isPlaying ? 'Pause' : 'Play'}</button>
                   <button onClick={handleStop}>Stop</button>
@@ -893,15 +997,21 @@ export default function ScorePlayerPage() {
                   <h4>🎵 Tempo</h4>
                   <div className="tempo-display">
                     {Math.round(scoreTimeline.tempoBpm * tempoMultiplier)} BPM
-                    <span className="tempo-original"> ({scoreTimeline.tempoBpm} BPM original)</span>
+                    <span className="tempo-original">({scoreTimeline.tempoBpm} BPM original)</span>
                   </div>
+
                   <div className="tempo-buttons">
                     {[0.5, 0.75, 1.0, 1.25, 1.5].map(m => (
-                      <button key={m} onClick={() => handleTempoChange(m)} className={tempoMultiplier === m ? 'active' : ''}>
+                      <button
+                        key={m}
+                        onClick={() => handleTempoChange(m)}
+                        className={tempoMultiplier === m ? 'active' : ''}
+                      >
                         {m}x
                       </button>
                     ))}
                   </div>
+
                   <input
                     type="range"
                     min={0.25}
@@ -914,17 +1024,25 @@ export default function ScorePlayerPage() {
                 </div>
               </div>
 
-              <div className="pitch-detector" style={{ marginTop: 16 }}>
+              <div className="pitch-detector">
                 <h4>Tuner</h4>
-                <button onClick={handleMicToggle}>{micActive ? 'Stoppa mikrofon' : 'Aktivera mikrofon'}</button>
+                <button onClick={handleMicToggle}>
+                  {micActive ? 'Stoppa mikrofon' : 'Aktivera mikrofon'}
+                </button>
 
                 {micActive && !isPlaying && (
                   <div className="pitch-display">
                     {pitchResult.frequency ? (
                       <>
-                        <div className="pitch-frequency">Frekvens: {pitchResult.frequency.toFixed(1)} Hz</div>
-                        <div className="pitch-note">Not: {frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---'}</div>
-                        <div className="pitch-clarity">Klarhet: {Math.round((pitchResult.clarity ?? 0) * 100)}%</div>
+                        <div className="pitch-frequency">
+                          Frekvens: {pitchResult.frequency.toFixed(1)} Hz
+                        </div>
+                        <div className="pitch-note">
+                          Not: {frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---'}
+                        </div>
+                        <div className="pitch-clarity">
+                          Klarhet: {Math.round((pitchResult.clarity ?? 0) * 100)}%
+                        </div>
                       </>
                     ) : (
                       <div className="pitch-no-signal">Ingen stabil pitch detekterad</div>
@@ -934,7 +1052,7 @@ export default function ScorePlayerPage() {
               </div>
 
               {micActive && (
-                <div className="latency-control" style={{ marginTop: 16 }}>
+                <div className="latency-control">
                   <h4>⏱️ Latency Compensation</h4>
                   <label>Mic/Playback latency: {latencyMs} ms</label>
                   <input
@@ -948,7 +1066,7 @@ export default function ScorePlayerPage() {
                 </div>
               )}
 
-              <div className="voice-mixer" style={{ marginTop: 16 }}>
+              <div className="voice-mixer">
                 <h4>Stämmor</h4>
                 {getVoices().map(v => {
                   const settings = getVoiceSettings(v)
@@ -961,7 +1079,9 @@ export default function ScorePlayerPage() {
                         min={0}
                         max={100}
                         value={settings.volume * 100}
-                        onChange={e => handleVoiceSettingsChange(v, { volume: parseInt(e.target.value) / 100 })}
+                        onChange={e =>
+                          handleVoiceSettingsChange(v, { volume: parseInt(e.target.value) / 100 })
+                        }
                       />
                       <button
                         onClick={() => handleVoiceSettingsChange(v, { muted: !settings.muted })}
@@ -980,6 +1100,8 @@ export default function ScorePlayerPage() {
                 })}
               </div>
             </>
+          ) : (
+            <p>Ladda en fil först.</p>
           )}
         </aside>
       </main>

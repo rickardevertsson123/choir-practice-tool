@@ -26,7 +26,7 @@ const DEFAULT_MAX_FREQ = 1000;    // Hz
 const TARGET_SEMITONE_SPAN = 3;   // ±3 semitones search window when targetHint exists
 
 // Energy / clarity thresholds
-const RMS_THRESHOLD = 0.001;      // you said you set this for testing; keep it here
+const RMS_THRESHOLD = 0.005;      // you said you set this for testing; keep it here
 const MIN_CLARITY = 0.35;         // lower than 0.4 to reduce "no pitch" cases, still strict-ish
 
 // Spike gate: suppress short-lived pitch jumps (helps note transitions)
