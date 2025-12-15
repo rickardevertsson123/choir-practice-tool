@@ -20,7 +20,7 @@ import './ScorePlayerPage.css'
 ========================= */
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
-const FFT_SIZE = 2048
+const FFT_SIZE = 4096
 const ANALYSIS_INTERVAL_MS = 50
 
 // Pitch gating
@@ -452,7 +452,7 @@ export default function ScorePlayerPage() {
       analyser.fftSize = FFT_SIZE
 
       // Du kan testa 0.0–0.3 här. För debugging kan 0.0 vara bra.
-      analyser.smoothingTimeConstant = 0.0
+      analyser.smoothingTimeConstant = 0.1
 
       source.connect(analyser)
       analyserRef.current = analyser
@@ -671,16 +671,21 @@ export default function ScorePlayerPage() {
           const next = notes[currentIdx + 1]
 
           // Om vårt tidsfönster korsar någon av notgränserna – tillåt båda
-          if (prev && pitchTime - TRANSITION_WINDOW_SEC <= cur.start) {
+          if (prev && prev.midi !== cur.midi && pitchTime - TRANSITION_WINDOW_SEC <= cur.start) {
             allowedTargets.unshift({ midi: prev.midi, start: prev.start, duration: prev.duration })
           }
 
-          if (next && pitchTime + TRANSITION_WINDOW_SEC >= cur.end) {
+          if (next && next.midi !== cur.midi && pitchTime + TRANSITION_WINDOW_SEC >= cur.end) {
             allowedTargets.push({ midi: next.midi, start: next.start, duration: next.duration })
           }
 
           // säkerställ max 2 targets (din låt)
           allowedTargets = allowedTargets.slice(-2)
+          // Dedupe identiska midi så targetsKey inte flappar "53" <-> "53,53"
+
+          if (allowedTargets.length === 2 && allowedTargets[0].midi === allowedTargets[1].midi) {
+            allowedTargets = [allowedTargets[1]]
+          }
         }
 
         // UI-target: visa current (eller nästa om vi är inne i korsningen)
@@ -767,16 +772,16 @@ export default function ScorePlayerPage() {
             const m = allowedTargets[0].midi
             bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m))
           } else {
-            const midis = allowedTargets.map(t => t.midi).sort((a, b) => a - b)
-            const m1 = midis[0]
-            const m2 = midis[midis.length - 1]
+            const midis = allowedTargets.map(t => t.midi).sort((a, b) => a - b);
+            const m1 = midis[0];
+            const m2 = midis[midis.length - 1];
 
-            const low = m1 - padMidi
-            const high = m2 + padMidi
+            const low = m1 - padMidi;
+            const high = m2 + padMidi;
 
-            if (stableMidi >= low && stableMidi <= high) bestCents = 0
-            else if (stableMidi < low) bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m1))
-            else bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m2))
+            if (judgeMidi >= low && judgeMidi <= high) bestCents = 0;
+            else if (judgeMidi < low) bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m1));
+            else bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m2));
           }
 
           setDistanceCents(bestCents)
