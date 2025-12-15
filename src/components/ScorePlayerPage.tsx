@@ -211,7 +211,7 @@ export default function ScorePlayerPage() {
     lastTrailDrawMsRef.current = nowMs
     lastTrailXRef.current = left
 
-    const alpha = clamp(absCents / 100, 0, 1)
+    const alpha = clamp(absCents / 100, 0, 0.3)
     ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`
     ctx.fillRect(left, top, 6, height)
   }
@@ -671,11 +671,11 @@ export default function ScorePlayerPage() {
           const next = notes[currentIdx + 1]
 
           // Om vårt tidsfönster korsar någon av notgränserna – tillåt båda
-          if (prev && pitchTime - TRANSITION_WINDOW_SEC <= prev.end) {
+          if (prev && pitchTime - TRANSITION_WINDOW_SEC <= cur.start) {
             allowedTargets.unshift({ midi: prev.midi, start: prev.start, duration: prev.duration })
           }
 
-          if (next && pitchTime + TRANSITION_WINDOW_SEC >= cur.start) {
+          if (next && pitchTime + TRANSITION_WINDOW_SEC >= cur.end) {
             allowedTargets.push({ midi: next.midi, start: next.start, duration: next.duration })
           }
 
@@ -686,11 +686,7 @@ export default function ScorePlayerPage() {
         // UI-target: visa current (eller nästa om vi är inne i korsningen)
         if (allowedTargets.length > 0) {
           const uiTarget = allowedTargets.length === 2 ? allowedTargets[1] : allowedTargets[0]
-          if (
-            !currentTargetNote ||
-            currentTargetNote.midi !== uiTarget.midi ||
-            currentTargetNote.start !== uiTarget.start
-          ) {
+          if (!currentTargetNote || currentTargetNote.midi !== uiTarget.midi) {
             setCurrentTargetNote({ voice, midi: uiTarget.midi, start: uiTarget.start, duration: uiTarget.duration })
           }
         } else {
@@ -882,6 +878,25 @@ export default function ScorePlayerPage() {
                           {distanceCents != null
                             ? `${distanceCents > 0 ? '+' : ''}${Math.round(distanceCents)} cent`
                             : '--- cent'}
+                          {distanceCents != null && (
+                            <div className="cents-bar">
+                              <div className="cents-bar__labels">
+                                <span>-50</span>
+                                <span>Perfect</span>
+                                <span>+50</span>
+                              </div>
+
+                              <div className="cents-bar__track">
+                                <div className="cents-bar__center" />
+                                <div
+                                  className="cents-bar__marker"
+                                  style={{
+                                    left: `${Math.max(0, Math.min(100, ((distanceCents + 50) / 100) * 100))}%`
+                                  }}
+                                />
+                              </div>
+                            </div>
+                          )}
                         </span>
                         <span className="pitch-clarity">Clarity: {Math.round((pitchResult.clarity ?? 0) * 100)}%</span>
                       </div>

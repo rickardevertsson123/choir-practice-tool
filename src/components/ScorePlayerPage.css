@@ -1297,3 +1297,55 @@
   border: 2px solid white;
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
 }
+
+.cents-bar {
+  margin-top: 10px;
+}
+
+.cents-bar__labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  opacity: 0.75;
+  margin-bottom: 6px;
+}
+.cents-bar { width: 100%; }
+.cents-bar__track { width: 100%; min-width: 260px; }
+
+.cents-bar__track {
+  position: relative;
+  height: 14px;
+  width: 100%;
+  max-width: 420px;   /* <-- detta är nyckeln */
+  margin: 0 auto;     /* centrerar den */
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(239,68,68,0.35),
+    rgba(34,197,94,0.45),
+    rgba(239,68,68,0.35)
+  );
+  overflow: hidden;
+}
+
+.cents-bar__marker {
+  position: absolute;
+  top: 50%;
+  width: 14px;        /* bredare */
+  height: 22px;       /* högre */
+  transform: translate(-50%, -50%);
+  border-radius: 7px;
+  background: white;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.35);
+}
+
+.cents-bar__marker {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 18px;
+  transform: translate(-50%, -50%);
+  border-radius: 6px;
+  background: rgba(255,255,255,0.9);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.25);
+}
