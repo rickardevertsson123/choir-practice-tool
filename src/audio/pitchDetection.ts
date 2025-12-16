@@ -32,6 +32,7 @@ const MIN_CLARITY = 0.35;         // lower than 0.4 to reduce "no pitch" cases, 
 // Spike gate: suppress short-lived pitch jumps (helps note transitions)
 const SPIKE_GATE_CENTS = 80;      // jump must exceed this to be considered a spike
 const SPIKE_GATE_CONFIRM_FRAMES = 2; // require 2 consecutive frames to accept large jump
+
 // -----------------------------
 
 // Internal singleton state (keeps behavior stable without changing ScorePlayerPage)

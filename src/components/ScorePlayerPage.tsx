@@ -20,14 +20,12 @@ import './ScorePlayerPage.css'
 ========================= */
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
-const FFT_SIZE = 4096
-const ANALYSIS_INTERVAL_MS = 50
-
-// Pitch gating
-const MIN_CLARITY = 0.4
-
-// Transition window (din inställning)
-const TRANSITION_WINDOW_SEC = 0.15
+const FFT_SIZE              = 4096 // 4096 bytes => 93 ms
+const ANALYSIS_INTERVAL_MS  = 50   // Periodic analysis
+//const MIN_CLARITY           = 0.7  // Pitch gating
+//const RED_THRESHOLD_CENTS   = 45;  // When to paint red
+//const TRANSITION_WINDOW_SEC = 0.15 // Transition window (din inställning)
+//const TRANSITION_GRACE_MS   = 150; // Transition grace
 
 function midiToNoteName(midi: number): string {
   const noteIndex = ((midi % 12) + 12) % 12
@@ -43,7 +41,7 @@ export default function ScorePlayerPage() {
   /* =========================
      DEBUG
   ========================= */
-  const DEBUG_PITCH = true
+  const DEBUG_PITCH = false
 
   const lastDbgRef = useRef({
     lastTargetsKey: '',
@@ -58,6 +56,24 @@ export default function ScorePlayerPage() {
     lastDbgRef.current.lastLogMs = now
     console.log(obj)
   }
+
+  type Difficulty = 'easy' | 'medium' | 'hard';
+
+  type PitchSettings = {
+    MIN_CLARITY: number;
+    RED_THRESHOLD_CENTS: number;
+    TRANSITION_WINDOW_SEC: number;
+    TRANSITION_GRACE_MS: number;
+  };
+
+  const DIFFICULTY_PRESETS: Record<Difficulty, PitchSettings> = {
+    easy:   { MIN_CLARITY: 0.65, RED_THRESHOLD_CENTS: 60, TRANSITION_WINDOW_SEC: 0.18, TRANSITION_GRACE_MS: 180 },
+    medium: { MIN_CLARITY: 0.70, RED_THRESHOLD_CENTS: 45, TRANSITION_WINDOW_SEC: 0.15, TRANSITION_GRACE_MS: 150 },
+    hard:   { MIN_CLARITY: 0.75, RED_THRESHOLD_CENTS: 30, TRANSITION_WINDOW_SEC: 0.12, TRANSITION_GRACE_MS: 110 },
+  };
+
+  const pitchSettingsRef = useRef<PitchSettings>(DIFFICULTY_PRESETS.medium);
+
 
   /* =========================
      REFS: DOM / OSMD
@@ -94,6 +110,10 @@ export default function ScorePlayerPage() {
   ========================= */
   const stableMidiRef = useRef<number | null>(null)
   const lastHintMidiRef = useRef<number | null>(null)
+  const lastStableJudgeMidiRef = useRef<number | null>(null);
+  const lastStableCentsRef = useRef<number>(0);
+  const transitionGraceUntilMsRef = useRef<number>(0);
+  const lastTargetMidiForGraceRef = useRef<number | null>(null);
 
   // Trail throttling
   const TRAIL_MAX_HZ = 25
@@ -122,7 +142,7 @@ export default function ScorePlayerPage() {
   const [micActive, setMicActive] = useState(false)
   const [pitchResult, setPitchResult] = useState<PitchResult>({ frequency: null, clarity: 0 })
 
-  const [latencyMs, setLatencyMs] = useState(140)
+  const [latencyMs, setLatencyMs] = useState(150)
   const latencyMsRef = useRef(latencyMs)
 
   const [currentTargetNote, setCurrentTargetNote] = useState<{
@@ -134,6 +154,14 @@ export default function ScorePlayerPage() {
 
   const [distanceCents, setDistanceCents] = useState<number | null>(null)
 
+  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+
+  /* =========================
+     Pitch User Levels
+  ========================= */
+  useEffect(() => {
+    pitchSettingsRef.current = DIFFICULTY_PRESETS[difficulty];
+  }, [difficulty]);
   /* =========================
      SYNC REFS
   ========================= */
@@ -187,13 +215,14 @@ export default function ScorePlayerPage() {
   }
 
   const drawTrailAtPlayhead = (absCents: number) => {
+    const S = pitchSettingsRef.current;
     const ctx = trailCtxRef.current
     const canvas = trailCanvasRef.current
     const playhead = playheadRef.current
     const container = scoreContainerRef.current
     if (!ctx || !canvas || !playhead || !container) return
 
-    if (absCents < 10) return
+    if (absCents < S.RED_THRESHOLD_CENTS) return
 
     const nowMs = performance.now()
     const minIntervalMs = 1000 / TRAIL_MAX_HZ
@@ -211,7 +240,8 @@ export default function ScorePlayerPage() {
     lastTrailDrawMsRef.current = nowMs
     lastTrailXRef.current = left
 
-    const alpha = clamp(absCents / 100, 0, 0.3)
+    const effectiveCents = Math.max(0, absCents - S.RED_THRESHOLD_CENTS);
+    const alpha = clamp(effectiveCents / 100, 0, 0.3)
     ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`
     ctx.fillRect(left, top, 6, height)
   }
@@ -390,11 +420,18 @@ export default function ScorePlayerPage() {
       osmdRef.current.cursor.reset()
       osmdRef.current.cursor.update()
     }
+
+    resetPitchEvaluationState();
+    stopDetectLoop();
   }
 
   function handleSeek(e: React.ChangeEvent<HTMLInputElement>) {
     const t = parseFloat(e.target.value)
     setCurrentTime(t)
+
+    resetPitchEvaluationState();
+    startDetectLoop();
+
     const p = playerRef.current
     if (!p) return
     p.seekTo(t)
@@ -604,11 +641,30 @@ export default function ScorePlayerPage() {
     return () => cancelAnimationFrame(raf)
   }, [scoreTimeline])
 
+  function resetPitchEvaluationState() {
+    // pitch smoothing / hint
+    stableMidiRef.current = null;
+    lastHintMidiRef.current = null;
+
+    // freeze state
+    lastStableJudgeMidiRef.current = null;
+    lastStableCentsRef.current = null;
+
+    // transition + grace
+    lastTargetMidiForGraceRef.current = null;
+    transitionGraceUntilMsRef.current = 0;
+
+    // note-level fallback
+    noteHadEvaluationRef.current = false;
+    lastNoteTargetRef.current = null;
+  }
+
   /* =========================
-     PITCH LOOP (med debug)
+     PITCH LOOP (freeze + transition grace)
   ========================= */
   function startDetectLoop() {
     const loop = () => {
+      const S = pitchSettingsRef.current;
       const analyser = analyserRef.current
       const ctx = audioContextRef.current
       const timeline = timelineRef.current
@@ -619,6 +675,7 @@ export default function ScorePlayerPage() {
         return
       }
 
+
       const buffer = new Float32Array(analyser.fftSize)
       analyser.getFloatTimeDomainData(buffer)
 
@@ -626,14 +683,15 @@ export default function ScorePlayerPage() {
       const windowSec = analyser.fftSize / sr
       const halfWindowSec = windowSec / 2
 
-      // pitchTime: mitten av mic-fönstret alignat mot playback-tid minus latency
       const rawNow = player?.getCurrentTime() ?? 0
       const correctedNow = rawNow - (latencyMsRef.current || 0) / 1000
       const pitchTime = correctedNow - halfWindowSec
 
       const voice = selectedVoiceRef.current
 
-      // allowedTargets: max 2 (current + ev next)
+      /* =========================
+        TARGET SELECTION
+      ========================= */
       let allowedTargets: Array<{ midi: number; start: number; duration: number }> = []
 
       if (timeline && voice) {
@@ -647,7 +705,6 @@ export default function ScorePlayerPage() {
           }))
           .sort((a, b) => a.start - b.start)
 
-        // hitta current: aktiv eller närmast före
         let currentIdx = -1
         for (let i = 0; i < notes.length; i++) {
           if (pitchTime >= notes[i].start && pitchTime < notes[i].end) {
@@ -667,30 +724,49 @@ export default function ScorePlayerPage() {
         if (currentIdx >= 0) {
           const cur = notes[currentIdx]
           allowedTargets.push({ midi: cur.midi, start: cur.start, duration: cur.duration })
+
           const prev = notes[currentIdx - 1]
           const next = notes[currentIdx + 1]
 
-          // Om vårt tidsfönster korsar någon av notgränserna – tillåt båda
-          if (prev && prev.midi !== cur.midi && pitchTime - TRANSITION_WINDOW_SEC <= cur.start) {
+          if (prev && prev.midi !== cur.midi && pitchTime - S.TRANSITION_WINDOW_SEC <= cur.start) {
             allowedTargets.unshift({ midi: prev.midi, start: prev.start, duration: prev.duration })
           }
 
-          if (next && next.midi !== cur.midi && pitchTime + TRANSITION_WINDOW_SEC >= cur.end) {
+          if (next && next.midi !== cur.midi && pitchTime + S.TRANSITION_WINDOW_SEC >= cur.end) {
             allowedTargets.push({ midi: next.midi, start: next.start, duration: next.duration })
           }
 
-          // säkerställ max 2 targets (din låt)
           allowedTargets = allowedTargets.slice(-2)
-          // Dedupe identiska midi så targetsKey inte flappar "53" <-> "53,53"
 
           if (allowedTargets.length === 2 && allowedTargets[0].midi === allowedTargets[1].midi) {
             allowedTargets = [allowedTargets[1]]
           }
         }
 
-        // UI-target: visa current (eller nästa om vi är inne i korsningen)
+        /* =========================
+          UI target + TRANSITION GRACE TRIGGER (A: target MIDI change)
+        ========================= */
         if (allowedTargets.length > 0) {
           const uiTarget = allowedTargets.length === 2 ? allowedTargets[1] : allowedTargets[0]
+
+          // Trigger grace only when target MIDI changes
+          const prevMidi = lastTargetMidiForGraceRef.current
+          if (prevMidi == null) {
+            lastTargetMidiForGraceRef.current = uiTarget.midi
+          } else if (prevMidi !== uiTarget.midi) {
+            lastTargetMidiForGraceRef.current = uiTarget.midi
+
+            const noteMs = (uiTarget.duration ?? 0) * 1000;
+
+            // Grace = min(fast max, 50% av notens längd), men aldrig under 40ms
+            const dynamicGraceMs = Math.min(
+              S.TRANSITION_GRACE_MS,
+              Math.max(40, noteMs * 0.5)
+            );
+
+            transitionGraceUntilMsRef.current = performance.now() + dynamicGraceMs
+          }
+
           if (!currentTargetNote || currentTargetNote.midi !== uiTarget.midi) {
             setCurrentTargetNote({ voice, midi: uiTarget.midi, start: uiTarget.start, duration: uiTarget.duration })
           }
@@ -701,7 +777,11 @@ export default function ScorePlayerPage() {
         if (currentTargetNote) setCurrentTargetNote(null)
       }
 
-      // DEBUG: logga när målton(er) byter (targetsKey)
+      const inTransitionGrace = performance.now() < transitionGraceUntilMsRef.current
+
+      /* =========================
+        DEBUG TARGET CHANGE (valfritt)
+      ========================= */
       const targetsArr = allowedTargets.map(t => t.midi).sort((a, b) => a - b)
       const targetsKey = targetsArr.join(',')
       if (targetsKey !== lastDbgRef.current.lastTargetsKey) {
@@ -711,58 +791,43 @@ export default function ScorePlayerPage() {
           rawNow: rawNow.toFixed(3),
           correctedNow: correctedNow.toFixed(3),
           pitchTime: pitchTime.toFixed(3),
-          latencyMs: latencyMsRef.current,
-          windowSec: windowSec.toFixed(3),
-          halfWindowSec: halfWindowSec.toFixed(3),
           targets: targetsArr
         })
-        // Reset smoothing och pitch-detector gate när targets byter
-        stableMidiRef.current = null;
-        lastHintMidiRef.current = null;
-        resetPitchDetectorState();
+        stableMidiRef.current = null
+        lastHintMidiRef.current = null
+        resetPitchDetectorState()
       }
 
-      // Pitch-detektion (hint: använd senaste target om vi har en)
+      /* =========================
+        PITCH DETECTION
+      ========================= */
       const hintMidi = allowedTargets.length > 0 ? allowedTargets[allowedTargets.length - 1].midi : undefined
       const result = detectPitch(buffer, sr, hintMidi != null ? { targetMidi: hintMidi } : undefined)
 
+      const isStableSignal = result.frequency != null && result.clarity >= S.MIN_CLARITY
       setPitchResult(result)
 
-      if (DEBUG_PITCH && (!result.frequency || result.clarity < MIN_CLARITY)) {
-        dbgLog({
-          type: 'NO_PITCH_OR_LOW_CLARITY',
-          rawNow: rawNow.toFixed(3),
-          correctedNow: correctedNow.toFixed(3),
-          pitchTime: pitchTime.toFixed(3),
-          freq: result.frequency ? result.frequency.toFixed(1) : null,
-          clarity: result.clarity.toFixed(2),
-          targets: targetsArr
-        })
-      }
-
-      // Cents + trail
+      /* =========================
+        CENTS + FREEZE LOGIC
+      ========================= */
       if (result.frequency && allowedTargets.length > 0) {
         const noteInfo = frequencyToNoteInfo(result.frequency)
         if (noteInfo) {
           const rawMidi = noteInfo.exactMidi
 
-          // reset smoothing när hint byter
           if (lastHintMidiRef.current == null || lastHintMidiRef.current !== hintMidi) {
             stableMidiRef.current = null
             lastHintMidiRef.current = hintMidi ?? null
             resetPitchDetectorState()
           }
 
-          // Lätt smoothing (separat från analyser.smoothingTimeConstant)
-          const prev = stableMidiRef.current
+          const prevStable = stableMidiRef.current
           const alpha = 0.35
-          const stableMidi = prev == null ? rawMidi : prev * (1 - alpha) + rawMidi * alpha
-          const judgeMidi = rawMidi; // <-- viktigt: döm på rå pitch i testbänk
+          const stableMidi = prevStable == null ? rawMidi : prevStable * (1 - alpha) + rawMidi * alpha
           stableMidiRef.current = stableMidi
 
-          // Bedömning:
-          // - 1 target: cents mot target
-          // - 2 targets: tillåt hela intervallet mellan dem (plus marginal), annars cents till närmaste kant
+          const judgeMidi = rawMidi
+
           const TRANSITION_PAD_CENTS = 30
           const padMidi = TRANSITION_PAD_CENTS / 100
 
@@ -772,44 +837,41 @@ export default function ScorePlayerPage() {
             const m = allowedTargets[0].midi
             bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m))
           } else {
-            const midis = allowedTargets.map(t => t.midi).sort((a, b) => a - b);
-            const m1 = midis[0];
-            const m2 = midis[midis.length - 1];
+            const midis = allowedTargets.map(t => t.midi).sort((a, b) => a - b)
+            const m1 = midis[0]
+            const m2 = midis[midis.length - 1]
 
-            const low = m1 - padMidi;
-            const high = m2 + padMidi;
+            const low = m1 - padMidi
+            const high = m2 + padMidi
 
-            if (judgeMidi >= low && judgeMidi <= high) bestCents = 0;
-            else if (judgeMidi < low) bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m1));
-            else bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m2));
+            if (judgeMidi >= low && judgeMidi <= high) bestCents = 0
+            else if (judgeMidi < low) bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m1))
+            else bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m2))
           }
 
-          setDistanceCents(bestCents)
+          // Freeze: update last stable only when signal is stable AND we have a cents value
+          if (isStableSignal && bestCents != null) {
+            lastStableJudgeMidiRef.current = judgeMidi
+            lastStableCentsRef.current = bestCents
+          }
 
-          if (player?.isPlaying() && result.clarity >= MIN_CLARITY && bestCents != null) {
-            const abs = Math.abs(bestCents)
+          const effectiveCents =
+            isStableSignal && bestCents != null ? bestCents : lastStableCentsRef.current
 
-            if (abs >= 10) {
-              dbgLog({
-                type: 'RED',
-                rawNow: rawNow.toFixed(3),
-                correctedNow: correctedNow.toFixed(3),
-                pitchTime: pitchTime.toFixed(3),
-                targets: targetsArr,
-                freq: result.frequency?.toFixed(1),
-                rawMidi: rawMidi.toFixed(2),
-                stableMidi: stableMidi.toFixed(2),
-                bestCents: bestCents.toFixed(1),
-                clarity: result.clarity.toFixed(2)
-              })
+          setDistanceCents(effectiveCents)
+
+          // Trail: only when stable AND not in transition grace
+          if (player?.isPlaying() && isStableSignal && !inTransitionGrace && effectiveCents != null) {
+            const abs = Math.abs(effectiveCents)
+            if (abs >= S.RED_THRESHOLD_CENTS) {
               drawTrailAtPlayhead(abs)
             }
           }
         } else {
-          setDistanceCents(null)
+          setDistanceCents(lastStableCentsRef.current)
         }
       } else {
-        setDistanceCents(null)
+        setDistanceCents(lastStableCentsRef.current)
       }
 
       detectTimerRef.current = window.setTimeout(loop, ANALYSIS_INTERVAL_MS)
@@ -817,6 +879,7 @@ export default function ScorePlayerPage() {
 
     loop()
   }
+
 
   /* =========================
      CLEANUP
@@ -929,6 +992,14 @@ export default function ScorePlayerPage() {
                   ))}
                 </select>
               </div>
+              <label>
+                Difficulty:&nbsp;
+                <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
+                  <option value="easy">Easy</option>
+                  <option value="medium">Medium</option>
+                  <option value="hard">Hard</option>
+                </select>
+              </label>
 
               <div className="player-controls" style={{ marginTop: 16 }}>
                 <h4>Spelare</h4>
