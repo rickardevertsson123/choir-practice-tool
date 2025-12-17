@@ -731,9 +731,11 @@ export default function ScorePlayerPage() {
       const voice = selectedVoiceRef.current
 
       /* =========================
-        TARGET SELECTION
+        TARGET SELECTION (optimized: two fixed slots)
       ========================= */
-      let allowedTargets: Array<{ midi: number; start: number; duration: number }> = []
+      let t0: { midi: number; start: number; duration: number } | null = null
+      let t1: { midi: number; start: number; duration: number } | null = null
+      let targetsCount = 0
 
       if (timeline && voice) {
         const notes = notesByVoiceRef.current?.[voice] ?? []
@@ -768,31 +770,47 @@ export default function ScorePlayerPage() {
 
         if (currentIdx >= 0) {
           const cur = notes[currentIdx]
-          allowedTargets.push({ midi: cur.midi, start: cur.start, duration: cur.duration })
-
           const prev = notes[currentIdx - 1]
           const next = notes[currentIdx + 1]
 
-          if (prev && prev.midi !== cur.midi && pitchTime - S.TRANSITION_WINDOW_SEC <= cur.start) {
-            allowedTargets.unshift({ midi: prev.midi, start: prev.start, duration: prev.duration })
+          const includePrev = !!(prev && prev.midi !== cur.midi && pitchTime - S.TRANSITION_WINDOW_SEC <= cur.start)
+          const includeNext = !!(next && next.midi !== cur.midi && pitchTime + S.TRANSITION_WINDOW_SEC >= cur.end)
+
+          if (includePrev && includeNext) {
+            // prev, cur, next -> keep last two (cur, next)
+            t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+            t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
+            targetsCount = 2
+          } else if (includePrev) {
+            // prev, cur -> keep both
+            t0 = { midi: prev!.midi, start: prev!.start, duration: prev!.duration }
+            t1 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+            targetsCount = 2
+          } else if (includeNext) {
+            // cur, next -> keep both
+            t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+            t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
+            targetsCount = 2
+          } else {
+            // only cur
+            t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+            t1 = null
+            targetsCount = 1
           }
 
-          if (next && next.midi !== cur.midi && pitchTime + S.TRANSITION_WINDOW_SEC >= cur.end) {
-            allowedTargets.push({ midi: next.midi, start: next.start, duration: next.duration })
-          }
-
-          allowedTargets = allowedTargets.slice(-2)
-
-          if (allowedTargets.length === 2 && allowedTargets[0].midi === allowedTargets[1].midi) {
-            allowedTargets = [allowedTargets[1]]
+          // If both targets are identical, keep only the latter
+          if (targetsCount === 2 && t0!.midi === t1!.midi) {
+            t0 = t1
+            t1 = null
+            targetsCount = 1
           }
         }
 
         /* =========================
           UI target + TRANSITION GRACE TRIGGER (A: target MIDI change)
         ========================= */
-        if (allowedTargets.length > 0) {
-          const uiTarget = allowedTargets.length === 2 ? allowedTargets[1] : allowedTargets[0]
+        if (targetsCount > 0) {
+          const uiTarget = targetsCount === 2 ? t1! : t0!
 
           // Trigger grace only when target MIDI changes
           const prevMidi = lastTargetMidiForGraceRef.current
@@ -827,7 +845,7 @@ export default function ScorePlayerPage() {
       /* =========================
         DEBUG TARGET CHANGE (valfritt)
       ========================= */
-      const targetsArr = allowedTargets.map(t => t.midi).sort((a, b) => a - b)
+      const targetsArr = targetsCount === 0 ? [] : (targetsCount === 1 ? [t0!.midi] : [t0!.midi, t1!.midi]).sort((a, b) => a - b)
       const targetsKey = targetsArr.join(',')
       if (targetsKey !== lastDbgRef.current.lastTargetsKey) {
         lastDbgRef.current.lastTargetsKey = targetsKey
@@ -846,7 +864,7 @@ export default function ScorePlayerPage() {
       /* =========================
         PITCH DETECTION
       ========================= */
-      const hintMidi = allowedTargets.length > 0 ? allowedTargets[allowedTargets.length - 1].midi : undefined
+      const hintMidi = targetsCount > 0 ? (targetsCount === 2 ? t1!.midi : t0!.midi) : undefined
       // time detectPitch
       const detectStart = performance.now()
       const result = detectPitch(buffer, sr, hintMidi != null ? { targetMidi: hintMidi } : undefined)
@@ -862,7 +880,7 @@ export default function ScorePlayerPage() {
       /* =========================
         CENTS + FREEZE LOGIC
       ========================= */
-      if (result.frequency && allowedTargets.length > 0) {
+      if (result.frequency && targetsCount > 0) {
         const noteInfo = frequencyToNoteInfo(result.frequency)
         if (noteInfo) {
           const rawMidi = noteInfo.exactMidi
@@ -885,11 +903,11 @@ export default function ScorePlayerPage() {
 
           let bestCents: number | null = null
 
-          if (allowedTargets.length === 1) {
-            const m = allowedTargets[0].midi
+          if (targetsCount === 1) {
+            const m = t0!.midi
             bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m))
           } else {
-            const midis = allowedTargets.map(t => t.midi).sort((a, b) => a - b)
+            const midis = targetsCount === 2 ? [t0!.midi, t1!.midi].sort((a, b) => a - b) : []
             const m1 = midis[0]
             const m2 = midis[midis.length - 1]
 
