@@ -105,6 +105,22 @@ export default function ScorePlayerPage() {
   const analyserRef = useRef<AnalyserNode | null>(null)
   const micStreamRef = useRef<MediaStream | null>(null)
   const detectTimerRef = useRef<number | null>(null)
+  const detectBufferRef = useRef<Float32Array | null>(null)
+  const notesByVoiceRef = useRef<Record<string, Array<{ midi: number; start: number; end: number; duration: number }>> | null>(null)
+  const notesIndexByVoiceRef = useRef<Record<string, number>>({})
+  // Performance counters
+  const perfIterationsRef = useRef(0)
+  const perfTotalLoopMsRef = useRef(0)
+  const perfMaxLoopMsRef = useRef(0)
+  const perfLastLoopMsRef = useRef(0)
+  const perfTotalDetectMsRef = useRef(0)
+  const perfMaxDetectMsRef = useRef(0)
+  const perfLastDetectMsRef = useRef(0)
+  const perfSkippedRef = useRef(0)
+  const perfLastConsoleMsRef = useRef(0)
+  const [perfSnapshot, setPerfSnapshot] = useState<null | {
+    iter: number; avgLoop: number; maxLoop: number; lastLoop: number; avgDetect: number; maxDetect: number; lastDetect: number; skipped: number;
+  }>(null)
 
   /* =========================
      REFS: PITCH / STABILISERING
@@ -291,6 +307,21 @@ export default function ScorePlayerPage() {
       timelineRef.current = timeline
       setScoreTimeline(timeline)
       setCurrentTime(0)
+
+      // Precompute notes grouped by voice to avoid rebuilding per-detection tick
+      const map: Record<string, Array<{ midi: number; start: number; end: number; duration: number }>> = {}
+      for (const n of timeline.notes) {
+        if (!map[n.voice]) map[n.voice] = []
+        map[n.voice].push({ midi: n.midiPitch, start: n.startTimeSeconds, end: n.startTimeSeconds + n.durationSeconds, duration: n.durationSeconds })
+      }
+      for (const k of Object.keys(map)) {
+        map[k].sort((a, b) => a.start - b.start)
+      }
+      notesByVoiceRef.current = map
+      // initialize per-voice indices
+      const idxMap: Record<string, number> = {}
+      for (const k of Object.keys(map)) idxMap[k] = 0
+      notesIndexByVoiceRef.current = idxMap
 
       clearTrail()
 
@@ -681,7 +712,12 @@ export default function ScorePlayerPage() {
       }
 
 
-      const buffer = new Float32Array(analyser.fftSize)
+      const loopStartMs = performance.now()
+
+      if (!detectBufferRef.current || detectBufferRef.current.length !== analyser.fftSize) {
+        detectBufferRef.current = new Float32Array(analyser.fftSize)
+      }
+      const buffer = detectBufferRef.current
       analyser.getFloatTimeDomainData(buffer)
 
       const sr = ctx.sampleRate
@@ -700,31 +736,35 @@ export default function ScorePlayerPage() {
       let allowedTargets: Array<{ midi: number; start: number; duration: number }> = []
 
       if (timeline && voice) {
-        const notes = timeline.notes
-          .filter(n => n.voice === voice)
-          .map(n => ({
-            midi: n.midiPitch,
-            start: n.startTimeSeconds,
-            end: n.startTimeSeconds + n.durationSeconds,
-            duration: n.durationSeconds
-          }))
-          .sort((a, b) => a.start - b.start)
+        const notes = notesByVoiceRef.current?.[voice] ?? []
 
-        let currentIdx = -1
-        for (let i = 0; i < notes.length; i++) {
-          if (pitchTime >= notes[i].start && pitchTime < notes[i].end) {
-            currentIdx = i
-            break
-          }
+        // Use a per-voice index that we advance/retreat instead of scanning
+        const idxMap = notesIndexByVoiceRef.current
+        if (!(voice in idxMap)) idxMap[voice] = 0
+        let currentIdx = idxMap[voice]
+
+        // clamp to valid range
+        if (currentIdx < 0) currentIdx = 0
+        if (currentIdx >= notes.length) currentIdx = Math.max(0, notes.length - 1)
+
+        // advance forward while pitchTime is beyond current note end
+        while (currentIdx < notes.length && pitchTime >= notes[currentIdx].end) {
+          currentIdx++
         }
-        if (currentIdx === -1) {
-          for (let i = notes.length - 1; i >= 0; i--) {
-            if (notes[i].start <= pitchTime) {
-              currentIdx = i
-              break
-            }
-          }
+
+        // step backward while pitchTime is before current note start
+        while (currentIdx > 0 && pitchTime < notes[currentIdx].start) {
+          currentIdx--
         }
+
+        // if we fell off the end, set to last valid or -1 if none
+        if (currentIdx >= notes.length) currentIdx = notes.length - 1
+
+        // update stored index for this voice
+        idxMap[voice] = currentIdx
+
+        // if pitchTime is before the first note, mark not found
+        if (notes.length === 0 || pitchTime < notes[0].start) currentIdx = -1
 
         if (currentIdx >= 0) {
           const cur = notes[currentIdx]
@@ -807,7 +847,14 @@ export default function ScorePlayerPage() {
         PITCH DETECTION
       ========================= */
       const hintMidi = allowedTargets.length > 0 ? allowedTargets[allowedTargets.length - 1].midi : undefined
+      // time detectPitch
+      const detectStart = performance.now()
       const result = detectPitch(buffer, sr, hintMidi != null ? { targetMidi: hintMidi } : undefined)
+      const detectEnd = performance.now()
+      const detectMs = detectEnd - detectStart
+      perfLastDetectMsRef.current = detectMs
+      perfTotalDetectMsRef.current += detectMs
+      if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
 
       const isStableSignal = result.frequency != null && result.clarity >= S.MIN_CLARITY
       setPitchResult(result)
@@ -879,11 +926,54 @@ export default function ScorePlayerPage() {
         setDistanceCents(lastStableCentsRef.current)
       }
 
+      const loopEndMs = performance.now()
+      const loopMs = loopEndMs - loopStartMs
+      perfLastLoopMsRef.current = loopMs
+      perfTotalLoopMsRef.current += loopMs
+      perfIterationsRef.current += 1
+      if (loopMs > perfMaxLoopMsRef.current) perfMaxLoopMsRef.current = loopMs
+      if (loopMs > ANALYSIS_INTERVAL_MS) perfSkippedRef.current += 1
+
       detectTimerRef.current = window.setTimeout(loop, ANALYSIS_INTERVAL_MS)
     }
 
     loop()
   }
+
+  // Snapshot perf to UI periodically while mic is active
+  useEffect(() => {
+    let snapTimer: number | null = null
+    if (micActive) {
+      snapTimer = window.setInterval(() => {
+        const iter = perfIterationsRef.current
+        const avgLoop = iter ? perfTotalLoopMsRef.current / iter : 0
+        const avgDetect = iter ? perfTotalDetectMsRef.current / iter : 0
+        setPerfSnapshot({
+          iter,
+          avgLoop: Math.round(avgLoop),
+          maxLoop: Math.round(perfMaxLoopMsRef.current),
+          lastLoop: Math.round(perfLastLoopMsRef.current),
+          avgDetect: Math.round(avgDetect),
+          maxDetect: Math.round(perfMaxDetectMsRef.current),
+          lastDetect: Math.round(perfLastDetectMsRef.current),
+          skipped: perfSkippedRef.current
+        })
+        // occasional console log (every ~5s)
+        const now = performance.now()
+        if (now - perfLastConsoleMsRef.current > 5000) {
+          perfLastConsoleMsRef.current = now
+          console.log('[perf] iter=', perfIterationsRef.current, 'avgLoop=', Math.round(avgLoop), 'ms', 'lastLoop=', Math.round(perfLastLoopMsRef.current), 'avgDetect=', Math.round(avgDetect), 'ms', 'skipped=', perfSkippedRef.current)
+        }
+      }, 700)
+    } else {
+      setPerfSnapshot(null)
+    }
+
+    return () => {
+      if (snapTimer) window.clearInterval(snapTimer)
+    }
+    // only tied to micActive
+  }, [micActive])
 
 
   /* =========================
@@ -933,6 +1023,14 @@ export default function ScorePlayerPage() {
               <>
                 <canvas ref={trailCanvasRef} className="trail-canvas" />
                 <div ref={playheadRef} className="playhead-marker" />
+
+                {perfSnapshot && micActive && (
+                  <div style={{ position: 'fixed', right: 12, bottom: 12, background: 'rgba(0,0,0,0.7)', color: 'white', padding: 8, borderRadius: 6, fontSize: 12, zIndex: 2000 }}>
+                    <div>perf: iter {perfSnapshot.iter} skipped {perfSnapshot.skipped}</div>
+                    <div>loop ms: last {perfSnapshot.lastLoop} avg {perfSnapshot.avgLoop} max {perfSnapshot.maxLoop}</div>
+                    <div>detect ms: last {perfSnapshot.lastDetect} avg {perfSnapshot.avgDetect} max {perfSnapshot.maxDetect}</div>
+                  </div>
+                )}
 
                 {micActive && isPlaying && currentTargetNote && (
                   <div className="pitch-detector-overlay">
