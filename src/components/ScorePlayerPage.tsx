@@ -12,6 +12,7 @@ import {
 
 import { ScorePlayer, VoiceMixerSettings, midiToFrequency } from '../audio/ScorePlayer'
 import { detectPitch, frequencyToNoteInfo, PitchResult, resetPitchDetectorState } from '../audio/pitchDetection'
+import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCalibration'
 
 import './ScorePlayerPage.css'
 
@@ -67,7 +68,7 @@ export default function ScorePlayerPage() {
   };
 
   const DIFFICULTY_PRESETS: Record<Difficulty, PitchSettings> = {
-    easy:   { MIN_CLARITY: 0.65, RED_THRESHOLD_CENTS: 60, TRANSITION_WINDOW_SEC: 0.18, TRANSITION_GRACE_MS: 180 },
+    easy:   { MIN_CLARITY: 0.50, RED_THRESHOLD_CENTS: 85, TRANSITION_WINDOW_SEC: 0.18, TRANSITION_GRACE_MS: 180 },
     medium: { MIN_CLARITY: 0.70, RED_THRESHOLD_CENTS: 45, TRANSITION_WINDOW_SEC: 0.15, TRANSITION_GRACE_MS: 150 },
     hard:   { MIN_CLARITY: 0.75, RED_THRESHOLD_CENTS: 30, TRANSITION_WINDOW_SEC: 0.12, TRANSITION_GRACE_MS: 110 },
   };
@@ -144,6 +145,10 @@ export default function ScorePlayerPage() {
 
   const [latencyMs, setLatencyMs] = useState(150)
   const latencyMsRef = useRef(latencyMs)
+
+  const [calibrating, setCalibrating] = useState(false)
+  const [calibrationMessage, setCalibrationMessage] = useState<string | null>(null)
+  const [calibrationProgress, setCalibrationProgress] = useState<number>(0)
 
   const [currentTargetNote, setCurrentTargetNote] = useState<{
     voice: VoiceId
@@ -1083,6 +1088,48 @@ export default function ScorePlayerPage() {
                     value={latencyMs}
                     onChange={e => setLatencyMs(parseInt(e.target.value, 10))}
                   />
+                  <div style={{ marginTop: 8 }}>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                      <button onClick={async () => {
+                        if (calibrating) return
+                        setCalibrating(true)
+                        setCalibrationMessage('Put mic on speaker. Sound latency is about to start')
+                        try {
+                          const ms = await calibrateLatency({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, durationMs: 6000 })
+                          setLatencyMs(Math.round(ms))
+                          setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                        } catch (err: any) {
+                          console.error(err)
+                          setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                        } finally {
+                          setCalibrating(false)
+                          setTimeout(() => setCalibrationMessage(null), 3000)
+                        }
+                      }} disabled={calibrating}>
+                        {calibrating ? 'Kalibrerar…' : 'Kalibrera (högtalare)'}
+                      </button>
+
+                      <button onClick={async () => {
+                        if (calibrating) return
+                        setCalibrating(true)
+                        setCalibrationMessage("Hörlurar: lyssna på takten och säg 'ta' varje gång du hör en tick")
+                        try {
+                          const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
+                          setLatencyMs(Math.round(ms))
+                          setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                        } catch (err: any) {
+                          console.error(err)
+                          setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                        } finally {
+                          setCalibrating(false)
+                          setTimeout(() => setCalibrationMessage(null), 3000)
+                        }
+                      }} disabled={calibrating}>
+                        {calibrating ? 'Kalibrerar…' : 'Kalibrera (hörlurar)'}
+                      </button>
+                    </div>
+                    {calibrationMessage && <div style={{ marginTop: 8 }}>{calibrationMessage}</div>}
+                  </div>
                 </div>
               )}
 
