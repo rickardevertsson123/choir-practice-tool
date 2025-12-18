@@ -28,6 +28,10 @@ export interface PlayerControls {
   getTempoMultiplier(): number;
 }
 
+/*
+ * Copyright (c) 2025 Rickard Evertsson
+ */
+
 export function midiToFrequency(midi: number): number {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }

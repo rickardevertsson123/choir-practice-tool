@@ -2,6 +2,10 @@
 // Target-aware only for search range (±3 semitones), never "snaps" pitch to target.
 // Includes an internal spike gate to suppress 1-frame pitch jumps (e.g. at note boundaries).
 
+/*
+ * Copyright (c) 2025 Rickard Evertsson
+ */
+
 export interface PitchResult {
   frequency: number | null; // null if no stable pitch detected
   clarity: number;          // 0-1, confidence of detection

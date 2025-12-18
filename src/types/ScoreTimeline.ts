@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) 2025 Rickard Evertsson
+ */
+
 export type VoiceId = "Soprano" | "Alto" | "Tenor" | "Bass" | string;
 
 export interface NoteEvent {

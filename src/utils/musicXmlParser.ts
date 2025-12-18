@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) 2025 Rickard Evertsson
+ */
+
 import { ScoreTimeline, NoteEvent, VoiceId } from '../types/ScoreTimeline';
 
 export interface PartMetadata {

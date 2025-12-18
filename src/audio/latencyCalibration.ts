@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) 2025 Rickard Evertsson
+ */
+
 export type CalibrateOptions = {
   audioContext?: AudioContext | null
   existingStream?: MediaStream | null

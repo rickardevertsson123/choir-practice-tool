@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) 2025 Rickard Evertsson
+ */
+
 import { useEffect, useRef, useState } from 'react'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import JSZip from 'jszip'

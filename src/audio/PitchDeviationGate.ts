@@ -1,3 +1,7 @@
+/*
+ * Copyright (c) 2025 Rickard Evertsson
+ */
+
 export class PitchDeviationGate {
   private history: number[] = [];
   private readonly confirmFrames: number;
