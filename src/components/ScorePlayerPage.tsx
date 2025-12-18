@@ -128,9 +128,11 @@ export default function ScorePlayerPage() {
   const stableMidiRef = useRef<number | null>(null)
   const lastHintMidiRef = useRef<number | null>(null)
   const lastStableJudgeMidiRef = useRef<number | null>(null);
-  const lastStableCentsRef = useRef<number>(0);
+  const lastStableCentsRef = useRef<number | null>(null);
   const transitionGraceUntilMsRef = useRef<number>(0);
   const lastTargetMidiForGraceRef = useRef<number | null>(null);
+  const noteHadEvaluationRef = useRef(false)
+  const lastNoteTargetRef = useRef<{ voice: VoiceId; midi: number; start: number; duration: number } | null>(null)
 
   // Trail throttling
   const TRAIL_MAX_HZ = 25
@@ -164,7 +166,7 @@ export default function ScorePlayerPage() {
 
   const [calibrating, setCalibrating] = useState(false)
   const [calibrationMessage, setCalibrationMessage] = useState<string | null>(null)
-  const [calibrationProgress, setCalibrationProgress] = useState<number>(0)
+  
 
   const [currentTargetNote, setCurrentTargetNote] = useState<{
     voice: VoiceId
@@ -718,7 +720,8 @@ export default function ScorePlayerPage() {
         detectBufferRef.current = new Float32Array(analyser.fftSize)
       }
       const buffer = detectBufferRef.current
-      analyser.getFloatTimeDomainData(buffer)
+      // cast to any to avoid TypeScript DOM typing mismatch (ArrayBuffer vs SharedArrayBuffer)
+      analyser.getFloatTimeDomainData(buffer as any)
 
       const sr = ctx.sampleRate
       const windowSec = analyser.fftSize / sr
@@ -956,6 +959,24 @@ export default function ScorePlayerPage() {
     }
 
     loop()
+  }
+
+  function stopDetectLoop() {
+    if (detectTimerRef.current) {
+      window.clearTimeout(detectTimerRef.current)
+      detectTimerRef.current = null
+    }
+
+    // reset perf snapshot and counters
+    perfIterationsRef.current = 0
+    perfTotalLoopMsRef.current = 0
+    perfMaxLoopMsRef.current = 0
+    perfLastLoopMsRef.current = 0
+    perfTotalDetectMsRef.current = 0
+    perfMaxDetectMsRef.current = 0
+    perfLastDetectMsRef.current = 0
+    perfSkippedRef.current = 0
+    setPerfSnapshot(null)
   }
 
   // Snapshot perf to UI periodically while mic is active

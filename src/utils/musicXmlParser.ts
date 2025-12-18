@@ -162,7 +162,6 @@ export async function buildScoreTimelineFromMusicXml(xml: string): Promise<Score
         maxVoiceTime = Math.max(maxVoiceTime, time);
       }
       
-      const measureLengthBeats = maxVoiceTime - measureStartBeats;
       measureStartBeats = maxVoiceTime;
       measureIndex++;
     }

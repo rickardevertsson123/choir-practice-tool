@@ -49,7 +49,7 @@ class VoiceSynth {
   amp: GainNode;            // per-voice synth envelope (not mixer)
   started = false;
 
-  constructor(private ctx: AudioContext, connectTo: AudioNode) {
+  constructor(ctx: AudioContext, connectTo: AudioNode) {
     this.osc = ctx.createOscillator();
     this.osc.type = 'sine';
 
@@ -127,7 +127,8 @@ export class ScorePlayer implements PlayerControls {
     this.audioContext = options?.audioContext || new AudioContext();
 
     this.masterGain = this.audioContext.createGain();
-    const masterVol = typeof options?.masterVolume === 'number' ? options.masterVolume : 0.25;
+    // Default master volume reduced to avoid output distortion on some setups
+    const masterVol = typeof options?.masterVolume === 'number' ? options.masterVolume : 0.15;
     this.masterGain.gain.value = Math.max(0, Math.min(1, masterVol));
     this.masterGain.connect(this.audioContext.destination);
 
