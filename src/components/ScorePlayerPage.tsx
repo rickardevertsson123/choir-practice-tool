@@ -86,6 +86,7 @@ export default function ScorePlayerPage() {
   const scoreContainerRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null)
+  const osmdContainerRef = useRef<HTMLDivElement | null>(null)
 
   const trailCanvasRef = useRef<HTMLCanvasElement>(null)
   const trailCtxRef = useRef<CanvasRenderingContext2D | null>(null)
@@ -95,6 +96,7 @@ export default function ScorePlayerPage() {
   ========================= */
   const cursorStepsRef = useRef<Array<{ step: number; musicalTime: number }>>([])
   const cursorPositionsRef = useRef<Array<{ step: number; left: number; top: number; height: number }>>([])
+  const positionsReadyRef = useRef(false)
 
   /* =========================
      REFS: PLAYER / TIMELINE
@@ -204,9 +206,13 @@ export default function ScorePlayerPage() {
      OSMD INIT
   ========================= */
   useEffect(() => {
-    if (!scoreContainerRef.current || osmdRef.current) return
+    // Initialize OSMD in a dedicated inner container so React doesn't also
+    // manage the same child nodes. Mixing React-managed children with
+    // third-party DOM mutations causes "removeChild" errors during
+    // reconciliation.
+    if (!osmdContainerRef.current || osmdRef.current) return
     try {
-      osmdRef.current = new OpenSheetMusicDisplay(scoreContainerRef.current, {
+      osmdRef.current = new OpenSheetMusicDisplay(osmdContainerRef.current, {
         autoResize: true,
         backend: 'svg',
         followCursor: false,
@@ -242,6 +248,7 @@ export default function ScorePlayerPage() {
   }
 
   const drawTrailAtPlayhead = (absCents: number) => {
+    if (!positionsReadyRef.current) return
     const S = pitchSettingsRef.current;
     const ctx = trailCtxRef.current
     const canvas = trailCanvasRef.current
@@ -331,14 +338,39 @@ export default function ScorePlayerPage() {
 
       clearTrail()
 
-      window.setTimeout(() => {
-        buildPositionCache()
-      }, 80)
+      // Reset pitch-detector internals and page-level pitch evaluation state so
+      // that loading a new file doesn't leave remnants from the previous song
+      // (spike gate, pending jumps, stable midi, transition grace, etc.).
+      resetPitchDetectorState()
+      resetPitchEvaluationState()
+      // Stop ongoing detect loop during file reinitialization; we'll restart it
+      // below if the mic is still active and things are ready.
+      stopDetectLoop()
+
+      // Build the position cache and wait for it to become ready before
+      // restarting detection. `buildPositionCache` waits one animation frame
+      // to ensure OSMD has painted its cursor elements.
+      await buildPositionCache()
 
       const voices = Array.from(new Set(timeline.notes.map(n => n.voice))).filter(
         v => !v.toLowerCase().includes('keyboard')
       )
-      if (!selectedVoice && voices.length) setSelectedVoice(voices[0])
+      // Ensure selected voice is valid for the new timeline. If the previous
+      // selection doesn't exist in the newly loaded score, pick the first.
+      if (voices.length) {
+        if (!selectedVoice || !voices.includes(selectedVoice)) setSelectedVoice(voices[0])
+      } else {
+        setSelectedVoice(null)
+      }
+
+      // If mic is active, restart detection loop after we've rebuilt timeline
+      // and indices. Give a short delay to allow player and caches to initialize.
+      if (micActive) {
+        // restart detection only after positions are ready
+        resetPitchDetectorState()
+        resetPitchEvaluationState()
+        startDetectLoop()
+      }
     } catch (err: any) {
       console.error(err)
       setError(`Kunde inte ladda filen: ${err?.message ?? 'Okänt fel'}`)
@@ -387,8 +419,10 @@ export default function ScorePlayerPage() {
     }
 
     try {
+      // Pass existing audio context when available so the player shares the
+      // same context as the mic (avoids multiple contexts and timing mismatch).
       // @ts-ignore
-      playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata })
+      playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata, audioContext: audioContextRef.current })
       timelineRef.current = scoreTimeline
 
       const initialSettings: Record<VoiceId, VoiceMixerSettings> = {}
@@ -428,6 +462,9 @@ export default function ScorePlayerPage() {
         setIsPlaying(false)
         setCurrentTime(0)
         clearTrail()
+        // Ensure detect loop is stopped when playback naturally ends
+        stopDetectLoop()
+        resetPitchEvaluationState()
       }
     }, 100)
 
@@ -564,13 +601,23 @@ export default function ScorePlayerPage() {
     setMicActive(false)
     setPitchResult({ frequency: null, clarity: 0 })
     setDistanceCents(null)
+    // Reset detector internals so next activation starts fresh
+    resetPitchDetectorState()
   }
 
   /* =========================
      PLAYHEAD + CURSOR POSITION CACHE
   ========================= */
-  const buildPositionCache = () => {
-    if (!osmdRef.current || !scoreContainerRef.current || cursorStepsRef.current.length === 0) return
+  async function buildPositionCache(): Promise<void> {
+    positionsReadyRef.current = false
+    if (!osmdRef.current || !scoreContainerRef.current || cursorStepsRef.current.length === 0) {
+      cursorPositionsRef.current = []
+      positionsReadyRef.current = true
+      return
+    }
+
+    // Wait a frame to ensure OSMD has painted its cursor elements
+    await new Promise(requestAnimationFrame)
 
     cursorPositionsRef.current = []
     osmdRef.current.cursor.reset()
@@ -596,6 +643,7 @@ export default function ScorePlayerPage() {
 
     osmdRef.current.cursor.reset()
     osmdRef.current.cursor.update()
+    positionsReadyRef.current = true
   }
 
   /* =========================
@@ -1060,6 +1108,7 @@ export default function ScorePlayerPage() {
           </div>
 
           <div ref={scoreContainerRef} id="score-container" className="score-container">
+            <div ref={osmdContainerRef} className="osmd-container" />
             {!scoreTimeline && <p>Välj en MusicXML- eller MXL-fil för att visa noter</p>}
 
             {scoreTimeline && (

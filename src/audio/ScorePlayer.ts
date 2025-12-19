@@ -128,7 +128,15 @@ export class ScorePlayer implements PlayerControls {
 
   constructor(timeline: ScoreTimeline, options?: ScorePlayerOptions) {
     this.timeline = timeline;
-    this.audioContext = options?.audioContext || new AudioContext();
+    // Use provided AudioContext when available to keep timing / inputs in sync
+    // and avoid creating multiple audio contexts when the mic is in use.
+    if (options?.audioContext) {
+      this.audioContext = options.audioContext;
+      this._ownsAudioContext = false;
+    } else {
+      this.audioContext = new AudioContext();
+      this._ownsAudioContext = true;
+    }
 
     this.masterGain = this.audioContext.createGain();
     // Default master volume reduced to avoid output distortion on some setups
@@ -140,6 +148,11 @@ export class ScorePlayer implements PlayerControls {
 
     console.log('ScorePlayer initialiserad med', timeline.notes.length, 'noter');
   }
+
+  // internal flag: true if this instance created the AudioContext and therefore
+  // should close it on dispose. If an external AudioContext was provided we
+  // must not close it.
+  private _ownsAudioContext = true;
 
   private initializeVoices(): void {
     const voices = new Set(this.timeline.notes.map(note => note.voice));
@@ -353,7 +366,10 @@ export class ScorePlayer implements PlayerControls {
       synth.dispose();
     }
     this.voiceSynths.clear();
-
-    this.audioContext.close();
+    
+    // Only close the audio context if we created it.
+    if (this._ownsAudioContext) {
+      try { this.audioContext.close(); } catch (e) {}
+    }
   }
 }
