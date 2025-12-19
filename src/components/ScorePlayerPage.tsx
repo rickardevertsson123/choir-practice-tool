@@ -113,6 +113,7 @@ export default function ScorePlayerPage() {
   const detectTimerRef = useRef<number | null>(null)
   const detectLoopRunningRef = useRef(false)
   const detectBufferRef = useRef<Float32Array | null>(null)
+  const detectWindowHalfSecRef = useRef<{ fftSize: number; sampleRate: number; halfWindowSec: number } | null>(null)
   const notesByVoiceRef = useRef<Record<string, Array<{ midi: number; start: number; end: number; duration: number }>> | null>(null)
   const notesIndexByVoiceRef = useRef<Record<string, number>>({})
   // Performance counters
@@ -795,8 +796,15 @@ export default function ScorePlayerPage() {
       analyser.getFloatTimeDomainData(buffer as any)
 
       const sr = ctx.sampleRate
-      const windowSec = analyser.fftSize / sr
-      const halfWindowSec = windowSec / 2
+      const fftSize = analyser.fftSize
+      const cached = detectWindowHalfSecRef.current
+      let halfWindowSec: number
+      if (cached && cached.fftSize === fftSize && cached.sampleRate === sr) {
+        halfWindowSec = cached.halfWindowSec
+      } else {
+        halfWindowSec = (fftSize / sr) / 2
+        detectWindowHalfSecRef.current = { fftSize, sampleRate: sr, halfWindowSec }
+      }
 
       const rawNow = player?.getCurrentTime() ?? 0
       const correctedNow = rawNow - (latencyMsRef.current || 0) / 1000

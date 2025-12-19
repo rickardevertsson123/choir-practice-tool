@@ -1,6 +1,10 @@
-// Pitch detection using normalized autocorrelation (NACF) + parabolic interpolation
+// Pitch detection using normalized autocorrelation (NACF) + parabolic interpolation.
 // Target-aware only for search range (±3 semitones), never "snaps" pitch to target.
 // Includes an internal spike gate to suppress 1-frame pitch jumps (e.g. at note boundaries).
+//
+// Performance notes:
+// - detectPitch is allocation-free per call by reusing internal buffers
+//   (Hann window coefficients, windowed buffer, prefix energy buffer).
 
 /*
  * Copyright (c) 2025 Rickard Evertsson
@@ -52,6 +56,43 @@ const state: DetectorState = {
   pendingJumpCount: 0,
 };
 
+type Workspace = {
+  n: number;
+  hann: Float32Array;
+  windowed: Float32Array;
+  prefixEnergy: Float64Array; // length n+1
+};
+
+// Module-level reusable workspace. This avoids per-call allocations without
+// forcing callers to manage buffers.
+const ws: Workspace = {
+  n: 0,
+  hann: new Float32Array(0),
+  windowed: new Float32Array(0),
+  prefixEnergy: new Float64Array(0),
+};
+
+function ensureWorkspace(n: number): Workspace {
+  if (ws.n === n) return ws;
+
+  ws.n = n;
+  ws.hann = new Float32Array(n);
+  ws.windowed = new Float32Array(n);
+  ws.prefixEnergy = new Float64Array(n + 1);
+
+  if (n > 1) {
+    const k = (2 * Math.PI) / (n - 1);
+    for (let i = 0; i < n; i++) {
+      // Hann window
+      ws.hann[i] = 0.5 * (1 - Math.cos(k * i));
+    }
+  } else if (n === 1) {
+    ws.hann[0] = 1;
+  }
+
+  return ws;
+}
+
 export function resetPitchDetectorState() {
   state.lastStableMidi = null;
   state.pendingJumpMidi = null;
@@ -71,29 +112,16 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, v));
 }
 
-function removeDCAndWindow(src: Float32Array): Float32Array {
+function dcRemoveAndApplyHann(
+  src: Float32Array,
+  dst: Float32Array,
+  hann: Float32Array,
+  mean: number
+) {
   // DC removal + Hann window (helps autocorr stability)
-  const n = src.length;
-  let mean = 0;
-  for (let i = 0; i < n; i++) mean += src[i];
-  mean /= n;
-
-  const out = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const x = src[i] - mean;
-    const w = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (n - 1))); // Hann
-    out[i] = x * w;
+  for (let i = 0; i < src.length; i++) {
+    dst[i] = (src[i] - mean) * hann[i];
   }
-  return out;
-}
-
-function computeRms(buf: Float32Array): number {
-  let sum = 0;
-  for (let i = 0; i < buf.length; i++) {
-    const v = buf[i];
-    sum += v * v;
-  }
-  return Math.sqrt(sum / buf.length);
 }
 
 /**
@@ -103,6 +131,7 @@ function computeRms(buf: Float32Array): number {
  */
 function findBestLagNacf(
   x: Float32Array,
+  prefixEnergy: Float64Array,
   sampleRate: number,
   minFreq: number,
   maxFreq: number
@@ -113,11 +142,11 @@ function findBestLagNacf(
   const maxLag = Math.floor(sampleRate / minFreq);
 
   // Precompute prefix energy for fast segment energy
-  const prefix = new Float64Array(n + 1);
-  prefix[0] = 0;
-  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i] + x[i] * x[i];
+  // prefixEnergy length must be n+1
+  prefixEnergy[0] = 0;
+  for (let i = 0; i < n; i++) prefixEnergy[i + 1] = prefixEnergy[i] + x[i] * x[i];
 
-  const energy = (start: number, end: number) => prefix[end] - prefix[start];
+  const energy = (start: number, end: number) => prefixEnergy[end] - prefixEnergy[start];
 
   const corrAtLag = (lag: number): number => {
     const m = n - lag;
@@ -227,7 +256,19 @@ export function detectPitch(
   sampleRate: number,
   targetHint?: TargetHint
 ): PitchResult {
-  const rms = computeRms(buffer);
+  const n = buffer.length;
+  if (n === 0) return { frequency: null, clarity: 0 };
+
+  // Compute DC mean and RMS in one pass (no allocations).
+  let sum = 0;
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) {
+    const v = buffer[i];
+    sum += v;
+    sumSq += v * v;
+  }
+  const mean = sum / n;
+  const rms = Math.sqrt(sumSq / n);
   if (rms < RMS_THRESHOLD) {
     // reset gating slowly? keep last stable to avoid flicker if you prefer:
     // state.pendingJumpMidi = null; state.pendingJumpCount = 0;
@@ -235,7 +276,8 @@ export function detectPitch(
   }
 
   // Preprocess
-  const x = removeDCAndWindow(buffer);
+  const w = ensureWorkspace(n);
+  dcRemoveAndApplyHann(buffer, w.windowed, w.hann, mean);
 
   // Choose search band
   let minFreq = DEFAULT_MIN_FREQ;
@@ -249,7 +291,7 @@ export function detectPitch(
   }
 
   // Find best lag by NACF
-  const { bestLag, clarity, corrAtLag } = findBestLagNacf(x, sampleRate, minFreq, maxFreq);
+  const { bestLag, clarity, corrAtLag } = findBestLagNacf(w.windowed, w.prefixEnergy, sampleRate, minFreq, maxFreq);
 
   if (bestLag === -1 || clarity < MIN_CLARITY) {
     return { frequency: null, clarity };
