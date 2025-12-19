@@ -21,7 +21,7 @@ import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCa
 import './ScorePlayerPage.css'
 
 /* =========================
-   KONSTANTER
+  CONSTANTS
 ========================= */
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
 
@@ -29,7 +29,7 @@ const FFT_SIZE              = 4096 // 4096 bytes => 93 ms
 const ANALYSIS_INTERVAL_MS  = 50   // Periodic analysis
 //const MIN_CLARITY           = 0.7  // Pitch gating
 //const RED_THRESHOLD_CENTS   = 45;  // When to paint red
-//const TRANSITION_WINDOW_SEC = 0.15 // Transition window (din inställning)
+//const TRANSITION_WINDOW_SEC = 0.15 // Transition window (your setting)
 //const TRANSITION_GRACE_MS   = 150; // Transition grace
 
 function midiToNoteName(midi: number): string {
@@ -56,7 +56,7 @@ export default function ScorePlayerPage() {
   function dbgLog(obj: any) {
     if (!DEBUG_PITCH) return
     const now = performance.now()
-    // max 10 logs/sek så konsolen inte dör
+    // max 10 logs/sec so the console doesn't get overwhelmed
     if (now - lastDbgRef.current.lastLogMs < 100) return
     lastDbgRef.current.lastLogMs = now
     console.log(obj)
@@ -433,7 +433,7 @@ export default function ScorePlayerPage() {
       setVoiceSettings(initialSettings)
     } catch (err) {
       console.error(err)
-      setError('Kunde inte skapa ljudspelare')
+      setError('Could not initialize audio player.')
     }
 
     return () => {
@@ -567,7 +567,7 @@ export default function ScorePlayerPage() {
       const analyser = audioContextRef.current.createAnalyser()
       analyser.fftSize = FFT_SIZE
 
-      // Du kan testa 0.0–0.3 här. För debugging kan 0.0 vara bra.
+      // You can try values from 0.0–0.3 here. For debugging, 0.0 can be useful.
       analyser.smoothingTimeConstant = 0.1
 
       source.connect(analyser)
@@ -586,7 +586,7 @@ export default function ScorePlayerPage() {
       startDetectLoop()
     } catch (err) {
       console.error(err)
-      setError('Kunde inte aktivera mikrofon. Kontrollera behörigheter.')
+      setError('Cannot active microphone. Check permissions.')
     }
   }
 
@@ -876,7 +876,7 @@ export default function ScorePlayerPage() {
 
             const noteMs = (uiTarget.duration ?? 0) * 1000;
 
-            // Grace = min(fast max, 50% av notens längd), men aldrig under 40ms
+            // Grace = min(fast max, 50% of the note's length), but never below 40ms
             const dynamicGraceMs = Math.min(
               S.TRANSITION_GRACE_MS,
               Math.max(40, noteMs * 0.5)
@@ -898,7 +898,7 @@ export default function ScorePlayerPage() {
       const inTransitionGrace = performance.now() < transitionGraceUntilMsRef.current
 
       /* =========================
-        DEBUG TARGET CHANGE (valfritt)
+        DEBUG TARGET CHANGE (optional)
       ========================= */
       const targetsArr = targetsCount === 0 ? [] : (targetsCount === 1 ? [t0!.midi] : [t0!.midi, t1!.midi]).sort((a, b) => a - b)
       const targetsKey = targetsArr.join(',')
@@ -1094,7 +1094,7 @@ export default function ScorePlayerPage() {
         <div className="score-section">
           <div className="file-upload-section">
             <label htmlFor="musicxml-file" className="file-upload-button">
-              Välj MusicXML/MXL-fil
+              Open MusicXML/MXL-file
             </label>
             <input
               id="musicxml-file"
@@ -1103,13 +1103,13 @@ export default function ScorePlayerPage() {
               onChange={handleFileSelect}
               className="file-input"
             />
-            {isLoading && <p className="status-text">Laddar...</p>}
+            {isLoading && <p className="status-text">Loading...</p>}
             {error && <p className="error-text">{error}</p>}
           </div>
 
           <div ref={scoreContainerRef} id="score-container" className="score-container">
             <div ref={osmdContainerRef} className="osmd-container" />
-            {!scoreTimeline && <p>Välj en MusicXML- eller MXL-fil för att visa noter</p>}
+            {!scoreTimeline && <p>Select a MusicXML or MXL file to display notes</p>}
 
             {scoreTimeline && (
               <>
@@ -1172,14 +1172,14 @@ export default function ScorePlayerPage() {
         </div>
 
         <aside className="control-panel">
-          <h3>Kontroller</h3>
+          <h3>Controls</h3>
 
           {scoreTimeline && (
             <>
               <div className="voice-selection">
-                <h4>🎤 Välj stämma att öva</h4>
+                <h4>🎤 Select voice to practice</h4>
                 <select value={selectedVoice || ''} onChange={e => setSelectedVoice(e.target.value as VoiceId)}>
-                  {!selectedVoice && <option value="">Välj stämma...</option>}
+                  {!selectedVoice && <option value="">Select voice...</option>}
                   {voicesHuman.map(v => (
                     <option key={v} value={v}>
                       {buildVoiceDisplayLabel(v, getVoices(), partMetadata)}
@@ -1197,7 +1197,7 @@ export default function ScorePlayerPage() {
               </label>
 
               <div className="player-controls" style={{ marginTop: 16 }}>
-                <h4>Spelare</h4>
+                <h4>Player</h4>
                 <div className="transport-controls">
                   <button onClick={handlePlayPause}>{isPlaying ? 'Pause' : 'Play'}</button>
                   <button onClick={handleStop}>Stop</button>
@@ -1249,18 +1249,18 @@ export default function ScorePlayerPage() {
 
               <div className="pitch-detector" style={{ marginTop: 16 }}>
                 <h4>Tuner</h4>
-                <button onClick={handleMicToggle}>{micActive ? 'Stoppa mikrofon' : 'Aktivera mikrofon'}</button>
+                <button onClick={handleMicToggle}>{micActive ? 'Deactivate microphone' : 'Activate microphone'}</button>
 
                 {micActive && !isPlaying && (
                   <div className="pitch-display">
                     {pitchResult.frequency ? (
                       <>
-                        <div className="pitch-frequency">Frekvens: {pitchResult.frequency.toFixed(1)} Hz</div>
-                        <div className="pitch-note">Not: {frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---'}</div>
-                        <div className="pitch-clarity">Klarhet: {Math.round((pitchResult.clarity ?? 0) * 100)}%</div>
+                        <div className="pitch-frequency">Frequency: {pitchResult.frequency.toFixed(1)} Hz</div>
+                        <div className="pitch-note">Note: {frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---'}</div>
+                        <div className="pitch-clarity">Clarity: {Math.round((pitchResult.clarity ?? 0) * 100)}%</div>
                       </>
                     ) : (
-                      <div className="pitch-no-signal">Ingen stabil pitch detekterad</div>
+                      <div className="pitch-no-signal">No stabile pitch detected</div>
                     )}
                   </div>
                 )}
@@ -1296,13 +1296,13 @@ export default function ScorePlayerPage() {
                           setTimeout(() => setCalibrationMessage(null), 3000)
                         }
                       }} disabled={calibrating}>
-                        {calibrating ? 'Kalibrerar…' : 'Kalibrera (högtalare)'}
+                        {calibrating ? 'Calibrating…' : 'Calibrate (speakers)'}
                       </button>
 
                       <button onClick={async () => {
                         if (calibrating) return
                         setCalibrating(true)
-                        setCalibrationMessage("Hörlurar: lyssna på takten och säg 'ta' varje gång du hör en tick")
+                        setCalibrationMessage("Headphones: listen to the metronome and say 'ta' every time you hear a tick")
                         try {
                           const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
                           setLatencyMs(Math.round(ms))
@@ -1315,7 +1315,7 @@ export default function ScorePlayerPage() {
                           setTimeout(() => setCalibrationMessage(null), 3000)
                         }
                       }} disabled={calibrating}>
-                        {calibrating ? 'Kalibrerar…' : 'Kalibrera (hörlurar)'}
+                        {calibrating ? 'Calibrating…' : 'Calibrate (headphones)'}
                       </button>
                     </div>
                     {calibrationMessage && <div style={{ marginTop: 8 }}>{calibrationMessage}</div>}
@@ -1324,7 +1324,7 @@ export default function ScorePlayerPage() {
               )}
 
               <div className="voice-mixer" style={{ marginTop: 16 }}>
-                <h4>Stämmor</h4>
+                <h4>Voices</h4>
                 {getVoices().map(v => {
                   const settings = getVoiceSettings(v)
                   const label = buildVoiceDisplayLabel(v, getVoices(), partMetadata)

@@ -97,7 +97,7 @@
   overflow-x: hidden;
 }
 
-/* OSMD/SVG ska ligga "under" trail */
+/* OSMD/SVG should be rendered beneath the trail */
 .score-container svg {
   position: relative;
   z-index: 1;
@@ -786,7 +786,7 @@
   background: rgba(220, 53, 69, 0.6);
 }
 
-/* Cirkulär stämval-meny */
+/* Circular voice selection menu */
 .voice-circle-menu {
   position: absolute;
   top: 50%;
@@ -836,7 +836,7 @@
   }
 }
 
-/* Responsiv storlek för mikrofon */
+/* Responsive sizing for microphone */
 @media (max-width: 768px) {
   .overlay-mic-button {
     width: 160px;
@@ -1083,7 +1083,7 @@
   gap: 8px;
 }
 
-/* Sjungen ton (kompakt) */
+/* Sung note (compact) */
 .sung-note {
   font-size: 48px;
   font-weight: 700;
@@ -1092,7 +1092,7 @@
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
 
-/* Målton (mindre) */
+/* Target tone (smaller) */
 .pitch-detector-overlay .target-note {
   font-size: 14px;
   color: rgba(255, 255, 255, 0.7);
@@ -1320,8 +1320,8 @@
   position: relative;
   height: 14px;
   width: 100%;
-  max-width: 420px;   /* <-- detta är nyckeln */
-  margin: 0 auto;     /* centrerar den */
+  max-width: 420px;   /* <-- this is the key */
+  margin: 0 auto;     /* centers it */
   border-radius: 999px;
   background: linear-gradient(
     90deg,
@@ -1335,8 +1335,8 @@
 .cents-bar__marker {
   position: absolute;
   top: 50%;
-  width: 14px;        /* bredare */
-  height: 22px;       /* högre */
+  width: 14px;        /* wider */
+  height: 22px;       /* taller */
   transform: translate(-50%, -50%);
   border-radius: 7px;
   background: white;
