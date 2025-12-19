@@ -1,4 +1,3 @@
-import React from 'react'
 import { frequencyToNoteInfo, PitchResult } from '../../audio/pitchDetection'
 import { VoiceId } from '../../types/ScoreTimeline'
 

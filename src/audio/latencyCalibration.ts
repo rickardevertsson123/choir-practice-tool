@@ -13,7 +13,7 @@ export type CalibrateOptions = {
   threshold?: number
 }
 
-function median(arr: number[]) {
+export function median(arr: number[]) {
   const s = arr.slice().sort((a, b) => a - b)
   const mid = Math.floor(s.length / 2)
   if (s.length === 0) return 0
