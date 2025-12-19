@@ -21,6 +21,17 @@ export interface PlayerControls {
   getVoiceSettings(voiceId: VoiceId): VoiceMixerSettings;
 
   getCurrentTime(): number;
+  /**
+   * Map an AudioContext time (seconds) to timeline time (seconds).
+   * Useful when aligning external analysis (e.g. AudioWorklet pitch frames)
+   * with playback time.
+   */
+  getTimeAtAudioContextTime(audioContextTimeSeconds: number): number;
+  /**
+   * Expose the underlying AudioContext used by this player.
+   * (Needed to keep mic/worklet and playback on the same clock.)
+   */
+  getAudioContext(): AudioContext;
   getDuration(): number;
   isPlaying(): boolean;
 
@@ -259,6 +270,20 @@ export class ScorePlayer implements PlayerControls {
       return Math.max(0, Math.min(dur, t));
     }
     return Math.max(0, Math.min(dur, this.currentTimeSeconds));
+  }
+
+  getTimeAtAudioContextTime(audioContextTimeSeconds: number): number {
+    const dur = this.timeline.totalDurationSeconds;
+    if (this.isPlayingState) {
+      const elapsed = audioContextTimeSeconds - this.playStartTime;
+      const t = this.timelineStartOffset + (elapsed * this.tempoMultiplier);
+      return Math.max(0, Math.min(dur, t));
+    }
+    return Math.max(0, Math.min(dur, this.currentTimeSeconds));
+  }
+
+  getAudioContext(): AudioContext {
+    return this.audioContext;
   }
 
   private updateAllVoiceGains(isInit = false): void {

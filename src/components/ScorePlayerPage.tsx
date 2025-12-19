@@ -114,20 +114,27 @@ export default function ScorePlayerPage() {
   const detectLoopRunningRef = useRef(false)
   const detectBufferRef = useRef<Float32Array | null>(null)
   const detectWindowHalfSecRef = useRef<{ fftSize: number; sampleRate: number; halfWindowSec: number } | null>(null)
+  const pitchWorkletNodeRef = useRef<AudioWorkletNode | null>(null)
+  const pitchWorkletTapGainRef = useRef<GainNode | null>(null)
+  const useWorkletRef = useRef(false)
   const notesByVoiceRef = useRef<Record<string, Array<{ midi: number; start: number; end: number; duration: number }>> | null>(null)
   const notesIndexByVoiceRef = useRef<Record<string, number>>({})
   // Performance counters
   const perfIterationsRef = useRef(0)
   const perfTotalLoopMsRef = useRef(0)
+  const perfMinLoopMsRef = useRef<number>(Infinity)
   const perfMaxLoopMsRef = useRef(0)
   const perfLastLoopMsRef = useRef(0)
   const perfTotalDetectMsRef = useRef(0)
+  const perfMinDetectMsRef = useRef<number>(Infinity)
   const perfMaxDetectMsRef = useRef(0)
   const perfLastDetectMsRef = useRef(0)
   const perfSkippedRef = useRef(0)
   const perfLastConsoleMsRef = useRef(0)
   const [perfSnapshot, setPerfSnapshot] = useState<null | {
-    iter: number; avgLoop: number; maxLoop: number; lastLoop: number; avgDetect: number; maxDetect: number; lastDetect: number; skipped: number;
+    iter: number; avgLoop: number; minLoop: number; maxLoop: number; lastLoop: number;
+    avgDetect: number; minDetect: number; maxDetect: number; lastDetect: number;
+    skipped: number;
   }>(null)
 
   /* =========================
@@ -578,14 +585,82 @@ export default function ScorePlayerPage() {
       if (!audioContextRef.current) audioContextRef.current = new AudioContext()
 
       const source = audioContextRef.current.createMediaStreamSource(stream)
-      const analyser = audioContextRef.current.createAnalyser()
-      analyser.fftSize = FFT_SIZE
+      const ctx = audioContextRef.current
 
-      // You can try values from 0.0–0.3 here. For debugging, 0.0 can be useful.
-      analyser.smoothingTimeConstant = 0.1
+      // CRITICAL: keep playback and mic/worklet on the same AudioContext clock.
+      // If ScorePlayer was created before the mic (audioContextRef.current was null),
+      // it will have created its own AudioContext, which breaks worklet timestamp
+      // alignment and makes target selection wrong.
+      const existingPlayer = playerRef.current
+      if (existingPlayer && scoreTimeline) {
+        try {
+          const playerCtx = existingPlayer.getAudioContext()
+          if (playerCtx !== ctx) {
+            const wasPlaying = existingPlayer.isPlaying()
+            const t = existingPlayer.getCurrentTime()
+            existingPlayer.dispose()
+            // Recreate on the shared context
+            // @ts-ignore
+            playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata, audioContext: ctx })
+            timelineRef.current = scoreTimeline
 
-      source.connect(analyser)
-      analyserRef.current = analyser
+            // Refresh mixer state from new player instance
+            const initialSettings: Record<VoiceId, VoiceMixerSettings> = {}
+            const voices = Array.from(new Set(scoreTimeline.notes.map(n => n.voice)))
+            for (const v of voices) {
+              initialSettings[v] = playerRef.current.getVoiceSettings(v)
+            }
+            setVoiceSettings(initialSettings)
+
+            // Restore time/play state (best-effort; avoids user-visible jumps)
+            playerRef.current.seekTo(t)
+            if (wasPlaying) playerRef.current.play()
+          }
+        } catch (e) {
+          console.warn('[audio] failed to rebind ScorePlayer to mic AudioContext', e)
+        }
+      }
+
+      // Prefer AudioWorklet (Tier 4). Fallback to analyser polling when unsupported.
+      useWorkletRef.current = false
+      if (ctx.audioWorklet && typeof ctx.audioWorklet.addModule === 'function') {
+        try {
+          await ctx.audioWorklet.addModule(
+            new URL('../audio/worklets/pitchDetector.worklet.ts', import.meta.url)
+          )
+
+          const node = new AudioWorkletNode(ctx, 'pitch-detector', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [1],
+            processorOptions: { windowSize: FFT_SIZE, analysisIntervalMs: ANALYSIS_INTERVAL_MS }
+          })
+
+          // Ensure the node is "pulled" by the graph but keep it silent.
+          const tap = ctx.createGain()
+          tap.gain.value = 0
+
+          source.connect(node)
+          node.connect(tap)
+          tap.connect(ctx.destination)
+
+          pitchWorkletNodeRef.current = node
+          pitchWorkletTapGainRef.current = tap
+          analyserRef.current = null
+          useWorkletRef.current = true
+        } catch (e) {
+          console.warn('[pitch] audioWorklet init failed; falling back to analyser loop', e)
+          useWorkletRef.current = false
+        }
+      }
+
+      if (!useWorkletRef.current) {
+        const analyser = ctx.createAnalyser()
+        analyser.fftSize = FFT_SIZE
+        analyser.smoothingTimeConstant = 0.1
+        source.connect(analyser)
+        analyserRef.current = analyser
+      }
 
       setMicActive(true)
 
@@ -597,7 +672,239 @@ export default function ScorePlayerPage() {
       // reset pitch detection internal gate too
       resetPitchDetectorState()
 
-      startDetectLoop()
+      // Start detection:
+      // - worklet mode is event-driven (port messages)
+      // - analyser mode uses polling loop
+      if (useWorkletRef.current && pitchWorkletNodeRef.current) {
+        stopDetectLoop()
+        pitchWorkletNodeRef.current.port.onmessage = (ev: MessageEvent<any>) => {
+          const handlerStartMs = performance.now()
+          const data = ev.data
+          if (!data || typeof data !== 'object') return
+          if (data.type !== 'pitch') return
+
+          const player = playerRef.current
+          const timeline = timelineRef.current
+          const voice = selectedVoiceRef.current
+          const S = pitchSettingsRef.current
+
+          const halfWindowSec =
+            typeof data.halfWindowSec === 'number'
+              ? data.halfWindowSec
+              : ((FFT_SIZE / (audioContextRef.current?.sampleRate ?? 44100)) / 2)
+
+          const audioTimeSec = typeof data.audioTimeSec === 'number' ? data.audioTimeSec : null
+
+          // IMPORTANT: Worklet timestamps are in AudioContext time (real seconds).
+          // We want to align the *center* of the analysis window with playback
+          // timeline time. Convert AudioContext seconds -> timeline seconds,
+          // then apply latency compensation in timeline seconds.
+          //
+          // This avoids mixing time bases (audio seconds vs timeline seconds),
+          // which would otherwise drift and make target selection wrong.
+          const analysisCenterAudioTimeSec =
+            audioTimeSec != null ? Math.max(0, audioTimeSec - halfWindowSec) : null
+
+          const rawNow =
+            analysisCenterAudioTimeSec != null && player
+              ? player.getTimeAtAudioContextTime(analysisCenterAudioTimeSec)
+              : (player?.getCurrentTime() ?? 0)
+
+          const pitchTime = rawNow - (latencyMsRef.current || 0) / 1000
+
+          // --- TARGET SELECTION (copied from detect loop, but driven by pitch messages) ---
+          let t0: { midi: number; start: number; duration: number } | null = null
+          let t1: { midi: number; start: number; duration: number } | null = null
+          let targetsCount = 0
+
+          const currentTarget = currentTargetNoteRef.current
+
+          if (timeline && voice) {
+            const notes = notesByVoiceRef.current?.[voice] ?? []
+            const idxMap = notesIndexByVoiceRef.current
+            if (!(voice in idxMap)) idxMap[voice] = 0
+            let currentIdx = idxMap[voice]
+
+            if (currentIdx < 0) currentIdx = 0
+            if (currentIdx >= notes.length) currentIdx = Math.max(0, notes.length - 1)
+
+            while (currentIdx < notes.length && pitchTime >= notes[currentIdx].end) currentIdx++
+            while (currentIdx > 0 && pitchTime < notes[currentIdx].start) currentIdx--
+            if (currentIdx >= notes.length) currentIdx = notes.length - 1
+            idxMap[voice] = currentIdx
+            if (notes.length === 0 || pitchTime < notes[0].start) currentIdx = -1
+
+            if (currentIdx >= 0) {
+              const cur = notes[currentIdx]
+              const prev = notes[currentIdx - 1]
+              const next = notes[currentIdx + 1]
+
+              const includePrev = !!(prev && prev.midi !== cur.midi && pitchTime - S.TRANSITION_WINDOW_SEC <= cur.start)
+              const includeNext = !!(next && next.midi !== cur.midi && pitchTime + S.TRANSITION_WINDOW_SEC >= cur.end)
+
+              if (includePrev && includeNext) {
+                t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+                t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
+                targetsCount = 2
+              } else if (includePrev) {
+                t0 = { midi: prev!.midi, start: prev!.start, duration: prev!.duration }
+                t1 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+                targetsCount = 2
+              } else if (includeNext) {
+                t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+                t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
+                targetsCount = 2
+              } else {
+                t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
+                t1 = null
+                targetsCount = 1
+              }
+
+              if (targetsCount === 2 && t0!.midi === t1!.midi) {
+                t0 = t1
+                t1 = null
+                targetsCount = 1
+              }
+            }
+
+            if (targetsCount > 0) {
+              const uiTarget = targetsCount === 2 ? t1! : t0!
+
+              const prevMidi = lastTargetMidiForGraceRef.current
+              if (prevMidi == null) {
+                lastTargetMidiForGraceRef.current = uiTarget.midi
+              } else if (prevMidi !== uiTarget.midi) {
+                lastTargetMidiForGraceRef.current = uiTarget.midi
+
+                const noteMs = (uiTarget.duration ?? 0) * 1000
+                const dynamicGraceMs = Math.min(
+                  S.TRANSITION_GRACE_MS,
+                  Math.max(40, noteMs * 0.5)
+                )
+                transitionGraceUntilMsRef.current = performance.now() + dynamicGraceMs
+              }
+
+              // Feed hint back to worklet so it can narrow the search range.
+              pitchWorkletNodeRef.current?.port.postMessage({ type: 'hint', targetMidi: uiTarget.midi })
+
+              if (!currentTarget || currentTarget.midi !== uiTarget.midi) {
+                const next = { voice, midi: uiTarget.midi, start: uiTarget.start, duration: uiTarget.duration }
+                currentTargetNoteRef.current = next
+                setCurrentTargetNote(next)
+              }
+            } else {
+              if (currentTarget) {
+                currentTargetNoteRef.current = null
+                setCurrentTargetNote(null)
+              }
+            }
+          } else {
+            if (currentTarget) {
+              currentTargetNoteRef.current = null
+              setCurrentTargetNote(null)
+            }
+          }
+
+          // --- PITCH RESULT + CENTS/JUDGEMENT (reuse existing page logic) ---
+          const result = { frequency: data.frequency ?? null, clarity: data.clarity ?? 0 }
+
+          // Reuse the same throttling used in the polling loop.
+          const lastPitch = lastEmittedPitchRef.current
+          const nextHz10 = result.frequency != null ? Math.round(result.frequency * 10) : null
+          const lastHz10 = lastPitch?.frequency != null ? Math.round(lastPitch.frequency * 10) : null
+          const nextClarityPct = Math.round((result.clarity ?? 0) * 100)
+          const lastClarityPct = Math.round(((lastPitch?.clarity ?? 0)) * 100)
+          if (nextHz10 !== lastHz10 || nextClarityPct !== lastClarityPct) {
+            lastEmittedPitchRef.current = result
+            setPitchResult(result)
+          }
+
+          const inTransitionGrace = performance.now() < transitionGraceUntilMsRef.current
+          const isStableSignal = result.frequency != null && result.clarity >= S.MIN_CLARITY
+
+          if (result.frequency && targetsCount > 0) {
+            const noteInfo = frequencyToNoteInfo(result.frequency)
+            if (noteInfo) {
+              const rawMidi = noteInfo.exactMidi
+
+              const hintMidi = targetsCount > 0 ? (targetsCount === 2 ? t1!.midi : t0!.midi) : undefined
+              if (lastHintMidiRef.current == null || lastHintMidiRef.current !== hintMidi) {
+                stableMidiRef.current = null
+                lastHintMidiRef.current = hintMidi ?? null
+                resetPitchDetectorState()
+              }
+
+              const prevStable = stableMidiRef.current
+              const alpha = 0.35
+              const stableMidi = prevStable == null ? rawMidi : prevStable * (1 - alpha) + rawMidi * alpha
+              stableMidiRef.current = stableMidi
+
+              const judgeMidi = rawMidi
+              const TRANSITION_PAD_CENTS = 30
+              const padMidi = TRANSITION_PAD_CENTS / 100
+
+              let bestCents: number | null = null
+              if (targetsCount === 1) {
+                bestCents = (judgeMidi - t0!.midi) * 100
+              } else {
+                const m0 = t0!.midi
+                const m1 = t1!.midi
+                const lowMidi = Math.min(m0, m1)
+                const highMidi = Math.max(m0, m1)
+                const low = lowMidi - padMidi
+                const high = highMidi + padMidi
+                if (judgeMidi >= low && judgeMidi <= high) bestCents = 0
+                else if (judgeMidi < low) bestCents = (judgeMidi - lowMidi) * 100
+                else bestCents = (judgeMidi - highMidi) * 100
+              }
+
+              if (isStableSignal && bestCents != null) {
+                lastStableJudgeMidiRef.current = judgeMidi
+                lastStableCentsRef.current = bestCents
+              }
+
+              const effectiveCents =
+                isStableSignal && bestCents != null ? bestCents : lastStableCentsRef.current
+
+              const lastRounded = lastEmittedDistanceRoundedRef.current
+              const nextRounded = effectiveCents == null ? null : Math.round(effectiveCents)
+              if (nextRounded !== lastRounded) {
+                lastEmittedDistanceRoundedRef.current = nextRounded
+                setDistanceCents(effectiveCents)
+              }
+
+              if (player?.isPlaying() && isStableSignal && !inTransitionGrace && effectiveCents != null) {
+                const abs = Math.abs(effectiveCents)
+                if (abs >= S.RED_THRESHOLD_CENTS) drawTrailAtPlayhead(abs)
+              }
+            }
+          } else {
+            const lastRounded = lastEmittedDistanceRoundedRef.current
+            const nextRounded = lastStableCentsRef.current == null ? null : Math.round(lastStableCentsRef.current)
+            if (nextRounded !== lastRounded) {
+              lastEmittedDistanceRoundedRef.current = nextRounded
+              setDistanceCents(lastStableCentsRef.current)
+            }
+          }
+
+          // --- PERF: update counters from worklet messages ---
+          const handlerEndMs = performance.now()
+          const loopMs = handlerEndMs - handlerStartMs
+          perfLastLoopMsRef.current = loopMs
+          perfTotalLoopMsRef.current += loopMs
+          perfIterationsRef.current += 1
+          if (loopMs < perfMinLoopMsRef.current) perfMinLoopMsRef.current = loopMs
+          if (loopMs > perfMaxLoopMsRef.current) perfMaxLoopMsRef.current = loopMs
+
+          const detectMs = typeof data.detectMs === 'number' ? data.detectMs : 0
+          perfLastDetectMsRef.current = detectMs
+          perfTotalDetectMsRef.current += detectMs
+          if (detectMs < perfMinDetectMsRef.current) perfMinDetectMsRef.current = detectMs
+          if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
+        }
+      } else {
+        startDetectLoop()
+      }
     } catch (err) {
       console.error(err)
       setError('Cannot active microphone. Check permissions.')
@@ -605,11 +912,19 @@ export default function ScorePlayerPage() {
   }
 
   function stopMic() {
+    // Stop any polling detect loop (fallback mode)
     if (detectTimerRef.current) window.clearTimeout(detectTimerRef.current)
     detectTimerRef.current = null
     detectLoopRunningRef.current = false
     lastEmittedPitchRef.current = null
     lastEmittedDistanceRoundedRef.current = null
+
+    // Worklet cleanup
+    try { pitchWorkletNodeRef.current?.disconnect() } catch {}
+    try { pitchWorkletTapGainRef.current?.disconnect() } catch {}
+    pitchWorkletNodeRef.current = null
+    pitchWorkletTapGainRef.current = null
+    useWorkletRef.current = false
 
     micStreamRef.current?.getTracks().forEach(t => t.stop())
     micStreamRef.current = null
@@ -1108,9 +1423,11 @@ export default function ScorePlayerPage() {
     // reset perf snapshot and counters
     perfIterationsRef.current = 0
     perfTotalLoopMsRef.current = 0
+    perfMinLoopMsRef.current = Infinity
     perfMaxLoopMsRef.current = 0
     perfLastLoopMsRef.current = 0
     perfTotalDetectMsRef.current = 0
+    perfMinDetectMsRef.current = Infinity
     perfMaxDetectMsRef.current = 0
     perfLastDetectMsRef.current = 0
     perfSkippedRef.current = 0
@@ -1128,9 +1445,11 @@ export default function ScorePlayerPage() {
         setPerfSnapshot({
           iter,
           avgLoop: Math.round(avgLoop),
+          minLoop: Number.isFinite(perfMinLoopMsRef.current) ? Math.round(perfMinLoopMsRef.current) : 0,
           maxLoop: Math.round(perfMaxLoopMsRef.current),
           lastLoop: Math.round(perfLastLoopMsRef.current),
           avgDetect: Math.round(avgDetect),
+          minDetect: Number.isFinite(perfMinDetectMsRef.current) ? Math.round(perfMinDetectMsRef.current) : 0,
           maxDetect: Math.round(perfMaxDetectMsRef.current),
           lastDetect: Math.round(perfLastDetectMsRef.current),
           skipped: perfSkippedRef.current
@@ -1205,8 +1524,8 @@ export default function ScorePlayerPage() {
                 {perfSnapshot && micActive && (
                   <div style={{ position: 'fixed', right: 12, bottom: 12, background: 'rgba(0,0,0,0.7)', color: 'white', padding: 8, borderRadius: 6, fontSize: 12, zIndex: 2000 }}>
                     <div>perf: iter {perfSnapshot.iter} skipped {perfSnapshot.skipped}</div>
-                    <div>loop ms: last {perfSnapshot.lastLoop} avg {perfSnapshot.avgLoop} max {perfSnapshot.maxLoop}</div>
-                    <div>detect ms: last {perfSnapshot.lastDetect} avg {perfSnapshot.avgDetect} max {perfSnapshot.maxDetect}</div>
+                    <div>loop ms: last {perfSnapshot.lastLoop} min {perfSnapshot.minLoop} avg {perfSnapshot.avgLoop} max {perfSnapshot.maxLoop}</div>
+                    <div>detect ms: last {perfSnapshot.lastDetect} min {perfSnapshot.minDetect} avg {perfSnapshot.avgDetect} max {perfSnapshot.maxDetect}</div>
                   </div>
                 )}
 
