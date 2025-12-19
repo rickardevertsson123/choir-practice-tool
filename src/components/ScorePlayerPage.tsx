@@ -19,6 +19,10 @@ import { detectPitch, frequencyToNoteInfo, PitchResult, resetPitchDetectorState 
 import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCalibration'
 
 import './ScorePlayerPage.css'
+import { PerfOverlay, PerfSnapshot } from './scorePlayerPage/PerfOverlay'
+import { PitchDetectorOverlay } from './scorePlayerPage/PitchDetectorOverlay'
+import { TunerPanel } from './scorePlayerPage/TunerPanel'
+import { LatencyControl } from './scorePlayerPage/LatencyControl'
 
 /* =========================
   CONSTANTS
@@ -131,11 +135,7 @@ export default function ScorePlayerPage() {
   const perfLastDetectMsRef = useRef(0)
   const perfSkippedRef = useRef(0)
   const perfLastConsoleMsRef = useRef(0)
-  const [perfSnapshot, setPerfSnapshot] = useState<null | {
-    iter: number; avgLoop: number; minLoop: number; maxLoop: number; lastLoop: number;
-    avgDetect: number; minDetect: number; maxDetect: number; lastDetect: number;
-    skipped: number;
-  }>(null)
+  const [perfSnapshot, setPerfSnapshot] = useState<PerfSnapshot | null>(null)
 
   /* =========================
      REFS: PITCH / STABILISERING
@@ -1521,56 +1521,16 @@ export default function ScorePlayerPage() {
                 <canvas ref={trailCanvasRef} className="trail-canvas" />
                 <div ref={playheadRef} className="playhead-marker" />
 
-                {perfSnapshot && micActive && (
-                  <div style={{ position: 'fixed', right: 12, bottom: 12, background: 'rgba(0,0,0,0.7)', color: 'white', padding: 8, borderRadius: 6, fontSize: 12, zIndex: 2000 }}>
-                    <div>perf: iter {perfSnapshot.iter} skipped {perfSnapshot.skipped}</div>
-                    <div>loop ms: last {perfSnapshot.lastLoop} min {perfSnapshot.minLoop} avg {perfSnapshot.avgLoop} max {perfSnapshot.maxLoop}</div>
-                    <div>detect ms: last {perfSnapshot.lastDetect} min {perfSnapshot.minDetect} avg {perfSnapshot.avgDetect} max {perfSnapshot.maxDetect}</div>
-                  </div>
-                )}
+                <PerfOverlay perfSnapshot={perfSnapshot} micActive={micActive} />
 
-                {micActive && isPlaying && currentTargetNote && (
-                  <div className="pitch-detector-overlay">
-                    <div className="pitch-detector-content">
-                      <div className="sung-note">
-                        {pitchResult.frequency
-                          ? frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---'
-                          : '---'}
-                      </div>
-                      <div className="target-note">Mål: {midiToNoteName(currentTargetNote.midi)}</div>
-                      <div className="pitch-info">
-                        <span className="pitch-hz">
-                          {pitchResult.frequency ? `${pitchResult.frequency.toFixed(1)} Hz` : '--- Hz'}
-                        </span>
-                        <span className="pitch-cents">
-                          {distanceCents != null
-                            ? `${distanceCents > 0 ? '+' : ''}${Math.round(distanceCents)} cent`
-                            : '--- cent'}
-                          {distanceCents != null && (
-                            <div className="cents-bar">
-                              <div className="cents-bar__labels">
-                                <span>-50</span>
-                                <span>Perfect</span>
-                                <span>+50</span>
-                              </div>
-
-                              <div className="cents-bar__track">
-                                <div className="cents-bar__center" />
-                                <div
-                                  className="cents-bar__marker"
-                                  style={{
-                                    left: `${Math.max(0, Math.min(100, ((distanceCents + 50) / 100) * 100))}%`
-                                  }}
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </span>
-                        <span className="pitch-clarity">Clarity: {Math.round((pitchResult.clarity ?? 0) * 100)}%</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                <PitchDetectorOverlay
+                  micActive={micActive}
+                  isPlaying={isPlaying}
+                  currentTargetNote={currentTargetNote}
+                  pitchResult={pitchResult}
+                  distanceCents={distanceCents}
+                  midiToNoteName={midiToNoteName}
+                />
               </>
             )}
           </div>
@@ -1652,81 +1612,47 @@ export default function ScorePlayerPage() {
                 </div>
               </div>
 
-              <div className="pitch-detector" style={{ marginTop: 16 }}>
-                <h4>Tuner</h4>
-                <button onClick={handleMicToggle}>{micActive ? 'Deactivate microphone' : 'Activate microphone'}</button>
+              <TunerPanel micActive={micActive} isPlaying={isPlaying} pitchResult={pitchResult} onMicToggle={handleMicToggle} />
 
-                {micActive && !isPlaying && (
-                  <div className="pitch-display">
-                    {pitchResult.frequency ? (
-                      <>
-                        <div className="pitch-frequency">Frequency: {pitchResult.frequency.toFixed(1)} Hz</div>
-                        <div className="pitch-note">Note: {frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---'}</div>
-                        <div className="pitch-clarity">Clarity: {Math.round((pitchResult.clarity ?? 0) * 100)}%</div>
-                      </>
-                    ) : (
-                      <div className="pitch-no-signal">No stabile pitch detected</div>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {micActive && (
-                <div className="latency-control" style={{ marginTop: 16 }}>
-                  <h4>⏱️ Latency Compensation</h4>
-                  <label>Mic/Playback latency: {latencyMs} ms</label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={400}
-                    step={10}
-                    value={latencyMs}
-                    onChange={e => setLatencyMs(parseInt(e.target.value, 10))}
-                  />
-                  <div style={{ marginTop: 8 }}>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                      <button onClick={async () => {
-                        if (calibrating) return
-                        setCalibrating(true)
-                        setCalibrationMessage('Put mic on speaker. Sound latency is about to start')
-                        try {
-                          const ms = await calibrateLatency({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, durationMs: 6000 })
-                          setLatencyMs(Math.round(ms))
-                          setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
-                        } catch (err: any) {
-                          console.error(err)
-                          setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
-                        } finally {
-                          setCalibrating(false)
-                          setTimeout(() => setCalibrationMessage(null), 3000)
-                        }
-                      }} disabled={calibrating}>
-                        {calibrating ? 'Calibrating…' : 'Calibrate (speakers)'}
-                      </button>
-
-                      <button onClick={async () => {
-                        if (calibrating) return
-                        setCalibrating(true)
-                        setCalibrationMessage("Headphones: listen to the metronome and say 'ta' every time you hear a tick")
-                        try {
-                          const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
-                          setLatencyMs(Math.round(ms))
-                          setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
-                        } catch (err: any) {
-                          console.error(err)
-                          setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
-                        } finally {
-                          setCalibrating(false)
-                          setTimeout(() => setCalibrationMessage(null), 3000)
-                        }
-                      }} disabled={calibrating}>
-                        {calibrating ? 'Calibrating…' : 'Calibrate (headphones)'}
-                      </button>
-                    </div>
-                    {calibrationMessage && <div style={{ marginTop: 8 }}>{calibrationMessage}</div>}
-                  </div>
-                </div>
-              )}
+              <LatencyControl
+                micActive={micActive}
+                latencyMs={latencyMs}
+                setLatencyMs={setLatencyMs}
+                calibrating={calibrating}
+                calibrationMessage={calibrationMessage}
+                onCalibrateSpeakers={async () => {
+                  if (calibrating) return
+                  setCalibrating(true)
+                  setCalibrationMessage('Put mic on speaker. Sound latency is about to start')
+                  try {
+                    const ms = await calibrateLatency({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, durationMs: 6000 })
+                    setLatencyMs(Math.round(ms))
+                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                  } catch (err: any) {
+                    console.error(err)
+                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                  } finally {
+                    setCalibrating(false)
+                    setTimeout(() => setCalibrationMessage(null), 3000)
+                  }
+                }}
+                onCalibrateHeadphones={async () => {
+                  if (calibrating) return
+                  setCalibrating(true)
+                  setCalibrationMessage("Headphones: listen to the metronome and say 'ta' every time you hear a tick")
+                  try {
+                    const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
+                    setLatencyMs(Math.round(ms))
+                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                  } catch (err: any) {
+                    console.error(err)
+                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                  } finally {
+                    setCalibrating(false)
+                    setTimeout(() => setCalibrationMessage(null), 3000)
+                  }
+                }}
+              />
 
               <div className="voice-mixer" style={{ marginTop: 16 }}>
                 <h4>Voices</h4>
