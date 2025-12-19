@@ -14,7 +14,7 @@ import {
   PartMetadata
 } from '../utils/musicXmlParser'
 
-import { ScorePlayer, VoiceMixerSettings, midiToFrequency } from '../audio/ScorePlayer'
+import { ScorePlayer, VoiceMixerSettings } from '../audio/ScorePlayer'
 import { detectPitch, frequencyToNoteInfo, PitchResult, resetPitchDetectorState } from '../audio/pitchDetection'
 import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCalibration'
 
@@ -180,10 +180,16 @@ export default function ScorePlayerPage() {
     start: number
     duration: number
   } | null>(null)
+  const currentTargetNoteRef = useRef<typeof currentTargetNote>(null)
 
   const [distanceCents, setDistanceCents] = useState<number | null>(null)
 
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+
+  // Avoid unnecessary rerenders from the detect loop by only committing
+  // user-visible changes (rounded values) to React state.
+  const lastEmittedPitchRef = useRef<PitchResult | null>(null)
+  const lastEmittedDistanceRoundedRef = useRef<number | null>(null)
 
   /* =========================
      Pitch User Levels
@@ -197,6 +203,10 @@ export default function ScorePlayerPage() {
   useEffect(() => {
     selectedVoiceRef.current = selectedVoice
   }, [selectedVoice])
+
+  useEffect(() => {
+    currentTargetNoteRef.current = currentTargetNote
+  }, [currentTargetNote])
 
   useEffect(() => {
     latencyMsRef.current = latencyMs
@@ -765,8 +775,8 @@ export default function ScorePlayerPage() {
         return
       }
 
-
       const loopStartMs = performance.now()
+      const nowMs = loopStartMs
 
       if (!detectBufferRef.current || detectBufferRef.current.length !== analyser.fftSize) {
         detectBufferRef.current = new Float32Array(analyser.fftSize)
@@ -784,6 +794,7 @@ export default function ScorePlayerPage() {
       const pitchTime = correctedNow - halfWindowSec
 
       const voice = selectedVoiceRef.current
+      const currentTarget = currentTargetNoteRef.current
 
       /* =========================
         TARGET SELECTION (optimized: two fixed slots)
@@ -882,38 +893,62 @@ export default function ScorePlayerPage() {
               Math.max(40, noteMs * 0.5)
             );
 
-            transitionGraceUntilMsRef.current = performance.now() + dynamicGraceMs
+            transitionGraceUntilMsRef.current = nowMs + dynamicGraceMs
           }
 
-          if (!currentTargetNote || currentTargetNote.midi !== uiTarget.midi) {
-            setCurrentTargetNote({ voice, midi: uiTarget.midi, start: uiTarget.start, duration: uiTarget.duration })
+          if (!currentTarget || currentTarget.midi !== uiTarget.midi) {
+            const next = { voice, midi: uiTarget.midi, start: uiTarget.start, duration: uiTarget.duration }
+            currentTargetNoteRef.current = next
+            setCurrentTargetNote(next)
           }
         } else {
-          if (currentTargetNote) setCurrentTargetNote(null)
+          if (currentTarget) {
+            currentTargetNoteRef.current = null
+            setCurrentTargetNote(null)
+          }
         }
       } else {
-        if (currentTargetNote) setCurrentTargetNote(null)
+        if (currentTarget) {
+          currentTargetNoteRef.current = null
+          setCurrentTargetNote(null)
+        }
       }
 
-      const inTransitionGrace = performance.now() < transitionGraceUntilMsRef.current
+      const inTransitionGrace = nowMs < transitionGraceUntilMsRef.current
 
       /* =========================
-        DEBUG TARGET CHANGE (optional)
+        TARGET CHANGE DETECT (low-allocation)
       ========================= */
-      const targetsArr = targetsCount === 0 ? [] : (targetsCount === 1 ? [t0!.midi] : [t0!.midi, t1!.midi]).sort((a, b) => a - b)
-      const targetsKey = targetsArr.join(',')
+      let aMidi: number | null = null
+      let bMidi: number | null = null
+      if (targetsCount === 1) {
+        aMidi = t0!.midi
+      } else if (targetsCount === 2) {
+        const m0 = t0!.midi
+        const m1 = t1!.midi
+        aMidi = Math.min(m0, m1)
+        bMidi = Math.max(m0, m1)
+      }
+      const targetsKey = targetsCount === 0 ? '' : (targetsCount === 1 ? String(aMidi) : `${aMidi},${bMidi}`)
       if (targetsKey !== lastDbgRef.current.lastTargetsKey) {
         lastDbgRef.current.lastTargetsKey = targetsKey
-        dbgLog({
-          type: 'TARGETS_CHANGED',
-          rawNow: rawNow.toFixed(3),
-          correctedNow: correctedNow.toFixed(3),
-          pitchTime: pitchTime.toFixed(3),
-          targets: targetsArr
-        })
+
+        // This reset is *behavioral* (not only debug): when targets change we
+        // want to clear smoothing + detector gates so old note state doesn't
+        // pollute new targets.
         stableMidiRef.current = null
         lastHintMidiRef.current = null
         resetPitchDetectorState()
+
+        if (DEBUG_PITCH) {
+          dbgLog({
+            type: 'TARGETS_CHANGED',
+            rawNow: rawNow.toFixed(3),
+            correctedNow: correctedNow.toFixed(3),
+            pitchTime: pitchTime.toFixed(3),
+            targets: targetsCount === 0 ? [] : (targetsCount === 1 ? [aMidi!] : [aMidi!, bMidi!])
+          })
+        }
       }
 
       /* =========================
@@ -930,7 +965,18 @@ export default function ScorePlayerPage() {
       if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
 
       const isStableSignal = result.frequency != null && result.clarity >= S.MIN_CLARITY
-      setPitchResult(result)
+      // Avoid rerenders when changes aren't user-visible.
+      // - UI prints Hz with 1 decimal and clarity as integer percent
+      // - so we only update state when those rounded values change
+      const lastPitch = lastEmittedPitchRef.current
+      const nextHz10 = result.frequency != null ? Math.round(result.frequency * 10) : null
+      const lastHz10 = lastPitch?.frequency != null ? Math.round(lastPitch.frequency * 10) : null
+      const nextClarityPct = Math.round((result.clarity ?? 0) * 100)
+      const lastClarityPct = Math.round(((lastPitch?.clarity ?? 0)) * 100)
+      if (nextHz10 !== lastHz10 || nextClarityPct !== lastClarityPct) {
+        lastEmittedPitchRef.current = result
+        setPitchResult(result)
+      }
 
       /* =========================
         CENTS + FREEZE LOGIC
@@ -960,18 +1006,20 @@ export default function ScorePlayerPage() {
 
           if (targetsCount === 1) {
             const m = t0!.midi
-            bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m))
+            // cents = 100 * (midiDiff)
+            bestCents = (judgeMidi - m) * 100
           } else {
-            const midis = targetsCount === 2 ? [t0!.midi, t1!.midi].sort((a, b) => a - b) : []
-            const m1 = midis[0]
-            const m2 = midis[midis.length - 1]
+            const m0 = t0!.midi
+            const m1 = t1!.midi
+            const lowMidi = Math.min(m0, m1)
+            const highMidi = Math.max(m0, m1)
 
-            const low = m1 - padMidi
-            const high = m2 + padMidi
+            const low = lowMidi - padMidi
+            const high = highMidi + padMidi
 
             if (judgeMidi >= low && judgeMidi <= high) bestCents = 0
-            else if (judgeMidi < low) bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m1))
-            else bestCents = 1200 * Math.log2(midiToFrequency(judgeMidi) / midiToFrequency(m2))
+            else if (judgeMidi < low) bestCents = (judgeMidi - lowMidi) * 100
+            else bestCents = (judgeMidi - highMidi) * 100
           }
 
           // Freeze: update last stable only when signal is stable AND we have a cents value
@@ -983,7 +1031,13 @@ export default function ScorePlayerPage() {
           const effectiveCents =
             isStableSignal && bestCents != null ? bestCents : lastStableCentsRef.current
 
-          setDistanceCents(effectiveCents)
+          // Avoid rerenders when the displayed value (rounded cents) is unchanged.
+          const lastRounded = lastEmittedDistanceRoundedRef.current
+          const nextRounded = effectiveCents == null ? null : Math.round(effectiveCents)
+          if (nextRounded !== lastRounded) {
+            lastEmittedDistanceRoundedRef.current = nextRounded
+            setDistanceCents(effectiveCents)
+          }
 
           // Trail: only when stable AND not in transition grace
           if (player?.isPlaying() && isStableSignal && !inTransitionGrace && effectiveCents != null) {
@@ -993,10 +1047,20 @@ export default function ScorePlayerPage() {
             }
           }
         } else {
-          setDistanceCents(lastStableCentsRef.current)
+          const lastRounded = lastEmittedDistanceRoundedRef.current
+          const nextRounded = lastStableCentsRef.current == null ? null : Math.round(lastStableCentsRef.current)
+          if (nextRounded !== lastRounded) {
+            lastEmittedDistanceRoundedRef.current = nextRounded
+            setDistanceCents(lastStableCentsRef.current)
+          }
         }
       } else {
-        setDistanceCents(lastStableCentsRef.current)
+        const lastRounded = lastEmittedDistanceRoundedRef.current
+        const nextRounded = lastStableCentsRef.current == null ? null : Math.round(lastStableCentsRef.current)
+        if (nextRounded !== lastRounded) {
+          lastEmittedDistanceRoundedRef.current = nextRounded
+          setDistanceCents(lastStableCentsRef.current)
+        }
       }
 
       const loopEndMs = performance.now()
