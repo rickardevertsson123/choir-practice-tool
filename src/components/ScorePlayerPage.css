@@ -1002,6 +1002,10 @@
   min-width: 80px;
 }
 
+.control-panel .mixer-voice-name {
+  color: #2c3e50;
+}
+
 .mixer-voice-row input[type="range"] {
   flex: 1;
   height: 4px;
@@ -1032,6 +1036,22 @@
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.control-panel .mixer-voice-row button {
+  border: 1px solid #cbd5e1;
+  background: #f8fafc;
+  color: #111827; /* makes "S" visible */
+}
+
+.control-panel .mixer-voice-row button:hover {
+  background: #eef2f7;
+}
+
+.control-panel .mixer-voice-row button.active {
+  background: #dc3545;
+  border-color: #dc3545;
+  color: white;
 }
 
 .mixer-voice-row button:hover {

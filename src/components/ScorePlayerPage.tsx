@@ -1561,6 +1561,48 @@ export default function ScorePlayerPage() {
                 </select>
               </label>
 
+              <TunerPanel micActive={micActive} isPlaying={isPlaying} pitchResult={pitchResult} onMicToggle={handleMicToggle} />
+
+              <LatencyControl
+                micActive={micActive}
+                latencyMs={latencyMs}
+                setLatencyMs={setLatencyMs}
+                calibrating={calibrating}
+                calibrationMessage={calibrationMessage}
+                onCalibrateSpeakers={async () => {
+                  if (calibrating) return
+                  setCalibrating(true)
+                  setCalibrationMessage('Put mic on speaker. Sound latency is about to start')
+                  try {
+                    const ms = await calibrateLatency({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, durationMs: 6000 })
+                    setLatencyMs(Math.round(ms))
+                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                  } catch (err: any) {
+                    console.error(err)
+                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                  } finally {
+                    setCalibrating(false)
+                    setTimeout(() => setCalibrationMessage(null), 3000)
+                  }
+                }}
+                onCalibrateHeadphones={async () => {
+                  if (calibrating) return
+                  setCalibrating(true)
+                  setCalibrationMessage("Headphones: listen to the metronome and say 'ta' every time you hear a tick")
+                  try {
+                    const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
+                    setLatencyMs(Math.round(ms))
+                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                  } catch (err: any) {
+                    console.error(err)
+                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                  } finally {
+                    setCalibrating(false)
+                    setTimeout(() => setCalibrationMessage(null), 3000)
+                  }
+                }}
+              />
+
               <div className="player-controls" style={{ marginTop: 16 }}>
                 <h4>Player</h4>
                 <div className="transport-controls">
@@ -1611,48 +1653,6 @@ export default function ScorePlayerPage() {
                   />
                 </div>
               </div>
-
-              <TunerPanel micActive={micActive} isPlaying={isPlaying} pitchResult={pitchResult} onMicToggle={handleMicToggle} />
-
-              <LatencyControl
-                micActive={micActive}
-                latencyMs={latencyMs}
-                setLatencyMs={setLatencyMs}
-                calibrating={calibrating}
-                calibrationMessage={calibrationMessage}
-                onCalibrateSpeakers={async () => {
-                  if (calibrating) return
-                  setCalibrating(true)
-                  setCalibrationMessage('Put mic on speaker. Sound latency is about to start')
-                  try {
-                    const ms = await calibrateLatency({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, durationMs: 6000 })
-                    setLatencyMs(Math.round(ms))
-                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
-                  } catch (err: any) {
-                    console.error(err)
-                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
-                  } finally {
-                    setCalibrating(false)
-                    setTimeout(() => setCalibrationMessage(null), 3000)
-                  }
-                }}
-                onCalibrateHeadphones={async () => {
-                  if (calibrating) return
-                  setCalibrating(true)
-                  setCalibrationMessage("Headphones: listen to the metronome and say 'ta' every time you hear a tick")
-                  try {
-                    const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
-                    setLatencyMs(Math.round(ms))
-                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
-                  } catch (err: any) {
-                    console.error(err)
-                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
-                  } finally {
-                    setCalibrating(false)
-                    setTimeout(() => setCalibrationMessage(null), 3000)
-                  }
-                }}
-              />
 
               <div className="voice-mixer" style={{ marginTop: 16 }}>
                 <h4>Voices</h4>
