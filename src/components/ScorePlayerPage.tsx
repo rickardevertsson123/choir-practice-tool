@@ -111,6 +111,7 @@ export default function ScorePlayerPage() {
   const analyserRef = useRef<AnalyserNode | null>(null)
   const micStreamRef = useRef<MediaStream | null>(null)
   const detectTimerRef = useRef<number | null>(null)
+  const detectLoopRunningRef = useRef(false)
   const detectBufferRef = useRef<Float32Array | null>(null)
   const notesByVoiceRef = useRef<Record<string, Array<{ midi: number; start: number; end: number; duration: number }>> | null>(null)
   const notesIndexByVoiceRef = useRef<Record<string, number>>({})
@@ -472,8 +473,7 @@ export default function ScorePlayerPage() {
         setIsPlaying(false)
         setCurrentTime(0)
         clearTrail()
-        // Ensure detect loop is stopped when playback naturally ends
-        stopDetectLoop()
+        // Keep detect loop running while mic is active (tuner should still work).
         resetPitchEvaluationState()
       }
     }, 100)
@@ -499,7 +499,10 @@ export default function ScorePlayerPage() {
     setIsPlaying(false)
 
     setCurrentTargetNote(null)
+    currentTargetNoteRef.current = null
     setDistanceCents(null)
+    lastEmittedDistanceRoundedRef.current = null
+    lastEmittedPitchRef.current = null
     stableMidiRef.current = null
     lastHintMidiRef.current = null
 
@@ -511,7 +514,7 @@ export default function ScorePlayerPage() {
     }
 
     resetPitchEvaluationState();
-    stopDetectLoop();
+    // Keep detect loop running while mic is active (tuner should still work).
   }
 
   function handleSeek(e: React.ChangeEvent<HTMLInputElement>) {
@@ -603,6 +606,9 @@ export default function ScorePlayerPage() {
   function stopMic() {
     if (detectTimerRef.current) window.clearTimeout(detectTimerRef.current)
     detectTimerRef.current = null
+    detectLoopRunningRef.current = false
+    lastEmittedPitchRef.current = null
+    lastEmittedDistanceRoundedRef.current = null
 
     micStreamRef.current?.getTracks().forEach(t => t.stop())
     micStreamRef.current = null
@@ -763,6 +769,9 @@ export default function ScorePlayerPage() {
      PITCH LOOP (freeze + transition grace)
   ========================= */
   function startDetectLoop() {
+    if (detectLoopRunningRef.current) return
+    detectLoopRunningRef.current = true
+
     const loop = () => {
       const S = pitchSettingsRef.current;
       const analyser = analyserRef.current
@@ -1082,6 +1091,11 @@ export default function ScorePlayerPage() {
       window.clearTimeout(detectTimerRef.current)
       detectTimerRef.current = null
     }
+    detectLoopRunningRef.current = false
+
+    // Reset UI-throttling caches so next start emits immediately.
+    lastEmittedPitchRef.current = null
+    lastEmittedDistanceRoundedRef.current = null
 
     // reset perf snapshot and counters
     perfIterationsRef.current = 0
