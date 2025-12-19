@@ -591,6 +591,10 @@
   background-color: white;
   border-radius: 4px;
   border: 1px solid #dee2e6;
+  /* Prevent layout jump when we go from "no signal" (1 row) to
+     frequency/note/clarity (multiple rows). */
+  box-sizing: border-box;
+  min-height: 140px;
 }
 
 .pitch-frequency {

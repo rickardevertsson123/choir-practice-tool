@@ -6,6 +6,11 @@ export type CalibrateOptions = {
   audioContext?: AudioContext | null
   existingStream?: MediaStream | null
   durationMs?: number
+  /**
+   * Optional absolute amplitude threshold for click detection (0..1).
+   * If omitted, a dynamic threshold based on measured noise floor is used.
+   */
+  threshold?: number
 }
 
 function median(arr: number[]) {
@@ -32,14 +37,14 @@ export async function calibrateLatency(opts: CalibrateOptions = {}): Promise<num
     analyser.fftSize = 2048
     micSource.connect(analyser)
 
-    // create a short percussive click buffer (~8ms)
-    const clickLen = Math.max(1, Math.floor(ctx.sampleRate * 0.008))
+    // Create a short, strong click (~10ms). Impulse-style is easier to detect
+    // reliably than decaying noise on many devices.
+    const clickLen = Math.max(1, Math.floor(ctx.sampleRate * 0.01))
     const clickBuf = ctx.createBuffer(1, clickLen, ctx.sampleRate)
     const data = clickBuf.getChannelData(0)
     for (let i = 0; i < clickLen; i++) {
-      // decaying noise
-      const env = Math.exp(-5 * (i / clickLen))
-      data[i] = (Math.random() * 2 - 1) * env * 0.6
+      // impulse + exponential decay
+      data[i] = (i === 0) ? 1.0 : Math.exp(-10 * (i / clickLen))
     }
 
     const intervalMs = 350
@@ -59,7 +64,10 @@ export async function calibrateLatency(opts: CalibrateOptions = {}): Promise<num
       src.start(t)
     }
 
-    const threshold = 0.12
+    // Detection threshold:
+    // - if caller provides one, use it
+    // - else compute a dynamic threshold from measured noise floor before clicks
+    const fixedThreshold = typeof opts.threshold === 'number' ? opts.threshold : null
     const minDetectGapMs = 80
     let lastDetectTime = 0
 
@@ -70,7 +78,7 @@ export async function calibrateLatency(opts: CalibrateOptions = {}): Promise<num
         // compute results
         if (detections.length === 0) {
           cleanup()
-          reject(new Error('No clicks detected'))
+          reject(new Error('No clicks detected (mic did not pick up the speaker clicks). Try increasing speaker volume, moving the mic closer, or use headphone calibration.'))
           return
         }
 
@@ -106,6 +114,11 @@ export async function calibrateLatency(opts: CalibrateOptions = {}): Promise<num
         resolve(ms)
       }, durationMs + 800)
 
+      // Measure a baseline noise floor for a short time window before the first click.
+      // We use max-abs as the detector also uses max-abs.
+      let baselineMax = 0
+      const baselineUntil = startTime - 0.02
+
       const poll = () => {
         analyser.getFloatTimeDomainData(sampleBuf)
         let max = 0
@@ -115,7 +128,20 @@ export async function calibrateLatency(opts: CalibrateOptions = {}): Promise<num
         }
 
         const now = ctx.currentTime
-        if (max > threshold && (now * 1000 - lastDetectTime) > minDetectGapMs) {
+        // Update baseline until the first click begins.
+        if (now < baselineUntil) {
+          if (max > baselineMax) baselineMax = max
+        }
+
+        const dynamicThreshold = fixedThreshold != null
+          ? fixedThreshold
+          : Math.max(
+              0.02,                 // absolute floor (keeps it from being too low)
+              baselineMax * 6,      // relative to noise floor
+              baselineMax + 0.015   // additive margin
+            )
+
+        if (max > dynamicThreshold && (now * 1000 - lastDetectTime) > minDetectGapMs) {
           lastDetectTime = now * 1000
           // record detection time
           detections.push(now)
