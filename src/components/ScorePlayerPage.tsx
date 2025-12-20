@@ -266,6 +266,19 @@ export default function ScorePlayerPage() {
     ctx.clearRect(0, 0, canvas.width, canvas.height)
   }
 
+  function clearTrailToRightOfPlayhead() {
+    const ctx = trailCtxRef.current
+    const canvas = trailCanvasRef.current
+    const playhead = playheadRef.current
+    if (!ctx || !canvas || !playhead) return
+
+    const left = parseFloat(playhead.style.left || '0')
+    if (!Number.isFinite(left)) return
+
+    const x = Math.max(0, Math.min(canvas.width, left + 1))
+    ctx.clearRect(x, 0, canvas.width - x, canvas.height)
+  }
+
   const drawTrailAtPlayhead = (absCents: number) => {
     if (!positionsReadyRef.current) return
     const S = pitchSettingsRef.current;
@@ -477,12 +490,20 @@ export default function ScorePlayerPage() {
       setIsPlaying(p.isPlaying())
 
       if (p.isPlaying() && t >= scoreTimeline.totalDurationSeconds - 0.02) {
-        p.stop()
-        setIsPlaying(false)
-        setCurrentTime(0)
+        // Auto-loop: restart immediately from the beginning.
+        // Trail is cleared on auto-loop so each loop is a fresh "take".
         clearTrail()
-        // Keep detect loop running while mic is active (tuner should still work).
         resetPitchEvaluationState()
+        resetPitchDetectorState()
+        setCurrentTargetNote(null)
+        currentTargetNoteRef.current = null
+        setDistanceCents(null)
+        lastEmittedDistanceRoundedRef.current = null
+        lastEmittedPitchRef.current = null
+
+        p.seekTo(0)
+        setCurrentTime(0)
+        setIsPlaying(true)
       }
     }, 100)
 
@@ -496,7 +517,26 @@ export default function ScorePlayerPage() {
     const p = playerRef.current
     if (!p) return
     if (p.isPlaying()) p.pause()
-    else p.play()
+    else {
+      const dur = scoreTimeline?.totalDurationSeconds ?? p.getDuration()
+      const t = p.getCurrentTime()
+      const atEnd = dur > 0 && t >= dur - 0.02
+
+      if (atEnd) {
+        // Intuitive behavior: if we're paused at the end, pressing Play should
+        // restart from the beginning. Clear the full trail only now (on Play),
+        // so the user can review the colored notes after finishing.
+        clearTrail()
+        resetPitchEvaluationState()
+        p.seekTo(0)
+        setCurrentTime(0)
+      } else {
+        // Clear everything ahead of the playhead so only the already-sung section
+        // remains visible. (Keeps the trail for review after playback ends.)
+        clearTrailToRightOfPlayhead()
+      }
+      p.play()
+    }
   }
 
   function handleStop() {
