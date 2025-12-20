@@ -24,6 +24,7 @@ import { PitchDetectorOverlay } from './scorePlayerPage/PitchDetectorOverlay'
 import { TunerPanel } from './scorePlayerPage/TunerPanel'
 import { LatencyControl } from './scorePlayerPage/LatencyControl'
 import { TransportBar } from './scorePlayerPage/TransportBar'
+import { AboutModal } from './scorePlayerPage/AboutModal'
 
 /* =========================
   CONSTANTS
@@ -195,6 +196,7 @@ export default function ScorePlayerPage() {
   const [distanceCents, setDistanceCents] = useState<number | null>(null)
 
   const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [aboutOpen, setAboutOpen] = useState(false)
 
   // Avoid unnecessary rerenders from the detect loop by only committing
   // user-visible changes (rounded values) to React state.
@@ -1533,7 +1535,12 @@ export default function ScorePlayerPage() {
   return (
     <div className="score-player-page">
       <header className="top-bar">
-        <h1>Choir Practice Tool</h1>
+        <div className="top-bar__row">
+          <h1>Choir Practice Tool</h1>
+          <button type="button" className="top-bar__infoBtn" aria-label="About" title="About" onClick={() => setAboutOpen(true)}>
+            ?
+          </button>
+        </div>
       </header>
 
       <main className="main-content">
@@ -1724,6 +1731,8 @@ export default function ScorePlayerPage() {
           )}
         </aside>
       </main>
+
+      <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
     </div>
   )
 }
