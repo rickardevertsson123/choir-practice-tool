@@ -1,6 +1,30 @@
 import { frequencyToNoteInfo, PitchResult } from '../../audio/pitchDetection'
 import { VoiceId } from '../../types/ScoreTimeline'
 
+function clamp(v: number, lo: number, hi: number) {
+  return Math.max(lo, Math.min(hi, v))
+}
+
+function lerp(a: number, b: number, t: number) {
+  return a + (b - a) * t
+}
+
+function centsToColor(distanceCents: number | null): string {
+  if (distanceCents == null) return 'rgba(255,255,255,0.92)'
+
+  // 0 cents => green, 50+ cents => red
+  const t = clamp(Math.abs(distanceCents) / 50, 0, 1)
+
+  // Tailwind-ish green/red used elsewhere in the UI
+  const green = { r: 34, g: 197, b: 94 }   // #22c55e
+  const red = { r: 239, g: 68, b: 68 }    // #ef4444
+
+  const r = Math.round(lerp(green.r, red.r, t))
+  const g = Math.round(lerp(green.g, red.g, t))
+  const b = Math.round(lerp(green.b, red.b, t))
+  return `rgb(${r}, ${g}, ${b})`
+}
+
 export function PitchDetectorOverlay(props: {
   micActive: boolean
   isPlaying: boolean
@@ -17,8 +41,10 @@ export function PitchDetectorOverlay(props: {
   return (
     <div className="pitch-detector-overlay">
       <div className="pitch-detector-content">
-        <div className="sung-note">{sungName}</div>
-        <div className="target-note">Mål: {midiToNoteName(currentTargetNote.midi)}</div>
+        <div className="sung-note" style={{ color: centsToColor(distanceCents) }}>
+          {sungName}
+        </div>
+        <div className="target-note">Target: {midiToNoteName(currentTargetNote.midi)}</div>
         <div className="pitch-info">
           <span className="pitch-hz">{pitchResult.frequency ? `${pitchResult.frequency.toFixed(1)} Hz` : '--- Hz'}</span>
           <span className="pitch-cents">

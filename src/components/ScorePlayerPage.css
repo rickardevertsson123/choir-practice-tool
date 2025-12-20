@@ -1109,9 +1109,8 @@
 
 /* Sung note (compact) */
 .sung-note {
-  font-size: 48px;
+  font-size: 56px;
   font-weight: 700;
-  color: white;
   line-height: 1;
   text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
 }
@@ -1354,6 +1353,21 @@
     rgba(239,68,68,0.35)
   );
   overflow: hidden;
+}
+
+/* Make the cents bar easier to read inside the overlay without changing the
+   overlay background transparency. */
+.pitch-detector-overlay .cents-bar__track {
+  background: linear-gradient(
+    90deg,
+    rgba(239, 68, 68, 0.55),
+    rgba(34, 197, 94, 0.70),
+    rgba(239, 68, 68, 0.55)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  box-shadow:
+    inset 0 2px 6px rgba(0, 0, 0, 0.35),
+    0 1px 8px rgba(0, 0, 0, 0.25);
 }
 
 .cents-bar__marker {
