@@ -957,6 +957,11 @@ export default function ScorePlayerPage() {
     for (let i = 0; i < cursorStepsRef.current.length; i++) {
       const cursorElement = osmdRef.current.cursor.cursorElement
       if (cursorElement) {
+        // Keep OSMD cursor invisible; we use our own playhead overlay for a smooth
+        // visual marker. (Opacity preserves layout/geometry so measurements still work.)
+        ;(cursorElement as any).style.opacity = '0'
+        ;(cursorElement as any).style.pointerEvents = 'none'
+
         const cursorRect = cursorElement.getBoundingClientRect()
         const containerRect = scoreContainerRef.current.getBoundingClientRect()
 
@@ -986,14 +991,14 @@ export default function ScorePlayerPage() {
     if (cursorStepsRef.current.length === 0) return
 
     let raf = 0
-    let lastStep = -1
+    let currentStepIndex = 0
+    let scrollTargetTop: number | null = null
 
     const updateCursorPosition = () => {
       const player = playerRef.current
-      const osmd = osmdRef.current
       const playhead = playheadRef.current
       const container = scoreContainerRef.current
-      if (!player || !osmd || !playhead || !container) return
+      if (!player || !playhead || !container) return
 
       const t = player.getCurrentTime()
       const tempoBpm = scoreTimeline.tempoBpm
@@ -1002,23 +1007,13 @@ export default function ScorePlayerPage() {
       const maxMusicalTime = cursorStepsRef.current[cursorStepsRef.current.length - 1]?.musicalTime || 0
       musicalTime = Math.max(0, Math.min(musicalTime, maxMusicalTime))
 
-      let currentStepIndex = 0
-      for (let i = 0; i < cursorStepsRef.current.length; i++) {
-        if (cursorStepsRef.current[i].musicalTime <= musicalTime) currentStepIndex = i
-        else break
-      }
-
-      const targetStep = cursorStepsRef.current[currentStepIndex].step
-
-      if (targetStep !== lastStep) {
-        osmd.cursor.reset()
-        for (let i = 0; i < targetStep; i++) {
-          if (osmd.cursor.Iterator.EndReached) break
-          osmd.cursor.next()
-        }
-        osmd.cursor.update()
-        lastStep = targetStep
-      }
+      // Incremental step tracking (avoid O(N) scan from 0 each frame)
+      const steps = cursorStepsRef.current
+      const lastIdx = steps.length - 1
+      if (currentStepIndex > lastIdx) currentStepIndex = lastIdx
+      if (currentStepIndex < 0) currentStepIndex = 0
+      while (currentStepIndex < lastIdx && steps[currentStepIndex + 1].musicalTime <= musicalTime) currentStepIndex++
+      while (currentStepIndex > 0 && steps[currentStepIndex].musicalTime > musicalTime) currentStepIndex--
 
       const currentStep = cursorStepsRef.current[currentStepIndex]
       const nextStep = cursorStepsRef.current[currentStepIndex + 1]
@@ -1040,15 +1035,32 @@ export default function ScorePlayerPage() {
         playhead.style.height = `${pos.height}px`
       }
 
+      // Smooth autoscroll: set a target and lerp toward it (avoids sudden jumps).
       if (cursorPositionsRef.current.length > currentStepIndex) {
         const pos = cursorPositionsRef.current[currentStepIndex]
         const scrollTop = container.scrollTop
         const viewH = container.clientHeight
 
-        if (pos.top > scrollTop + viewH - 200) {
-          container.scrollTop = pos.top - viewH / 3
-        } else if (pos.top < scrollTop + 100) {
-          container.scrollTop = pos.top - 150
+        const bottomMargin = 200
+        const topMargin = 100
+
+        if (pos.top > scrollTop + viewH - bottomMargin) {
+          scrollTargetTop = pos.top - viewH / 3
+        } else if (pos.top < scrollTop + topMargin) {
+          scrollTargetTop = pos.top - 150
+        }
+
+        if (scrollTargetTop != null) {
+          const clampedTarget = Math.max(0, Math.min(scrollTargetTop, container.scrollHeight - viewH))
+          const delta = clampedTarget - container.scrollTop
+          // Lerp with a max step to keep it responsive but smooth.
+          const step = Math.max(-40, Math.min(40, delta * 0.18))
+          if (Math.abs(delta) < 1) {
+            container.scrollTop = clampedTarget
+            scrollTargetTop = null
+          } else {
+            container.scrollTop = container.scrollTop + step
+          }
         }
       }
     }
