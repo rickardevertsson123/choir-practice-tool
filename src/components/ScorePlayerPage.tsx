@@ -23,6 +23,7 @@ import { PerfOverlay, PerfSnapshot } from './scorePlayerPage/PerfOverlay'
 import { PitchDetectorOverlay } from './scorePlayerPage/PitchDetectorOverlay'
 import { TunerPanel } from './scorePlayerPage/TunerPanel'
 import { LatencyControl } from './scorePlayerPage/LatencyControl'
+import { TransportBar } from './scorePlayerPage/TransportBar'
 
 /* =========================
   CONSTANTS
@@ -563,18 +564,6 @@ export default function ScorePlayerPage() {
 
     resetPitchEvaluationState();
     // Keep detect loop running while mic is active (tuner should still work).
-  }
-
-  function handleSeek(e: React.ChangeEvent<HTMLInputElement>) {
-    const t = parseFloat(e.target.value)
-    setCurrentTime(t)
-
-    resetPitchEvaluationState();
-    startDetectLoop();
-
-    const p = playerRef.current
-    if (!p) return
-    p.seekTo(t)
   }
 
   function handleTempoChange(mult: number) {
@@ -1586,6 +1575,23 @@ export default function ScorePlayerPage() {
               </>
             )}
           </div>
+
+          {scoreTimeline && (
+            <TransportBar
+              isPlaying={isPlaying}
+              currentTime={currentTime}
+              duration={scoreTimeline.totalDurationSeconds}
+              onPlayPause={handlePlayPause}
+              onStop={handleStop}
+              onSeek={(t) => {
+                // Keep behavior identical to the old slider handler.
+                setCurrentTime(t)
+                resetPitchEvaluationState()
+                startDetectLoop()
+                playerRef.current?.seekTo(t)
+              }}
+            />
+          )}
         </div>
 
         <aside className="control-panel">
@@ -1655,55 +1661,32 @@ export default function ScorePlayerPage() {
                 }}
               />
 
-              <div className="player-controls" style={{ marginTop: 16 }}>
-                <h4>Player</h4>
-                <div className="transport-controls">
-                  <button onClick={handlePlayPause}>{isPlaying ? 'Pause' : 'Play'}</button>
-                  <button onClick={handleStop}>Stop</button>
+              <div className="tempo-control" style={{ marginTop: 16 }}>
+                <h4>🎵 Tempo</h4>
+                <div className="tempo-display">
+                  {Math.round(scoreTimeline.tempoBpm * tempoMultiplier)} BPM
+                  <span className="tempo-original"> ({scoreTimeline.tempoBpm} BPM original)</span>
                 </div>
-
-                <div className="timeline-control">
-                  <label>
-                    Tid: {currentTime.toFixed(1)}s / {scoreTimeline.totalDurationSeconds.toFixed(1)}s
-                  </label>
-                  <input
-                    type="range"
-                    min={0}
-                    max={scoreTimeline.totalDurationSeconds}
-                    step={0.05}
-                    value={currentTime}
-                    onChange={handleSeek}
-                    className="timeline-slider"
-                  />
+                <div className="tempo-buttons">
+                  {[0.5, 0.75, 1.0, 1.25, 1.5].map(m => (
+                    <button
+                      key={m}
+                      onClick={() => handleTempoChange(m)}
+                      className={tempoMultiplier === m ? 'active' : ''}
+                    >
+                      {m}x
+                    </button>
+                  ))}
                 </div>
-
-                <div className="tempo-control">
-                  <h4>🎵 Tempo</h4>
-                  <div className="tempo-display">
-                    {Math.round(scoreTimeline.tempoBpm * tempoMultiplier)} BPM
-                    <span className="tempo-original"> ({scoreTimeline.tempoBpm} BPM original)</span>
-                  </div>
-                  <div className="tempo-buttons">
-                    {[0.5, 0.75, 1.0, 1.25, 1.5].map(m => (
-                      <button
-                        key={m}
-                        onClick={() => handleTempoChange(m)}
-                        className={tempoMultiplier === m ? 'active' : ''}
-                      >
-                        {m}x
-                      </button>
-                    ))}
-                  </div>
-                  <input
-                    type="range"
-                    min={0.25}
-                    max={2.0}
-                    step={0.05}
-                    value={tempoMultiplier}
-                    onChange={e => handleTempoChange(parseFloat(e.target.value))}
-                    className="tempo-slider"
-                  />
-                </div>
+                <input
+                  type="range"
+                  min={0.25}
+                  max={2.0}
+                  step={0.05}
+                  value={tempoMultiplier}
+                  onChange={e => handleTempoChange(parseFloat(e.target.value))}
+                  className="tempo-slider"
+                />
               </div>
 
               <div className="voice-mixer" style={{ marginTop: 16 }}>
