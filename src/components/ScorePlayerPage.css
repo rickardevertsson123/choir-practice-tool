@@ -1383,6 +1383,17 @@
   line-height: 1.2;
 }
 
+/* Ensure clarity text is readable in the dark overlay (global .pitch-clarity is gray). */
+.pitch-detector-overlay .pitch-clarity {
+  color: #fff;
+}
+
+.pitch-detector-overlay .pitch-debug {
+  font-size: 12px;
+  font-weight: 500;
+  color: rgba(255, 255, 255, 0.85);
+}
+
 /* Horisontell bar - kompakt */
 .pitch-bar-container {
   width: 100%;

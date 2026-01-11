@@ -6,14 +6,14 @@ export function TunerPanel(props: {
   pitchResult: PitchResult
   onMicToggle: () => void | Promise<void>
 }) {
-  const { micActive, isPlaying, pitchResult, onMicToggle } = props
+  const { micActive, pitchResult, onMicToggle } = props
 
   return (
     <div className="pitch-detector" style={{ marginTop: 16 }}>
       <h4>Tuner</h4>
       <button onClick={onMicToggle}>{micActive ? 'Deactivate microphone' : 'Activate microphone'}</button>
 
-      {micActive && !isPlaying && (
+      {micActive && (
         <div className="pitch-display">
           {pitchResult.frequency ? (
             <>

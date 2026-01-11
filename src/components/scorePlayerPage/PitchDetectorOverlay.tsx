@@ -25,16 +25,20 @@ function centsToColor(distanceCents: number | null): string {
   return `rgb(${r}, ${g}, ${b})`
 }
 
-export function PitchDetectorOverlay(props: {
+export type PitchDetectorOverlayProps = {
   micActive: boolean
   isPlaying: boolean
   currentTargetNote: { voice: VoiceId; midi: number; start: number; duration: number } | null
   pitchResult: PitchResult
   distanceCents: number | null
   midiToNoteName: (midi: number) => string
-}) {
-  const { micActive, isPlaying, currentTargetNote, pitchResult, distanceCents, midiToNoteName } = props
-  if (!micActive || !isPlaying || !currentTargetNote) return null
+}
+
+export function PitchDetectorOverlay(props: PitchDetectorOverlayProps) {
+  const { micActive, currentTargetNote, pitchResult, distanceCents, midiToNoteName } = props
+  // Show overlay whenever mic is active so the user can pause playback and still
+  // practice holding/finding the pitch.
+  if (!micActive) return null
 
   const sungName = pitchResult.frequency ? frequencyToNoteInfo(pitchResult.frequency)?.noteName ?? '---' : '---'
 
@@ -44,30 +48,38 @@ export function PitchDetectorOverlay(props: {
         <div className="sung-note" style={{ color: centsToColor(distanceCents) }}>
           {sungName}
         </div>
-        <div className="target-note">Target: {midiToNoteName(currentTargetNote.midi)}</div>
+        <div className="target-note">
+          {currentTargetNote
+            ? `Target: ${midiToNoteName(currentTargetNote.midi)}`
+            : 'Reference: nearest semitone'}
+        </div>
         <div className="pitch-info">
           <span className="pitch-hz">{pitchResult.frequency ? `${pitchResult.frequency.toFixed(1)} Hz` : '--- Hz'}</span>
           <span className="pitch-cents">
             {distanceCents != null ? `${distanceCents > 0 ? '+' : ''}${Math.round(distanceCents)} cent` : '--- cent'}
-            {distanceCents != null && (
-              <div className="cents-bar">
-                <div className="cents-bar__labels">
-                  <span>-50</span>
-                  <span>Perfect</span>
-                  <span>+50</span>
-                </div>
-
-                <div className="cents-bar__track">
-                  <div className="cents-bar__center" />
-                  <div
-                    className="cents-bar__marker"
-                    style={{ left: `${Math.max(0, Math.min(100, ((distanceCents + 50) / 100) * 100))}%` }}
-                  />
-                </div>
+            {/* Always render the bar so the overlay doesn't jump in size.
+                When cents is null, hide the marker. */}
+            <div className="cents-bar">
+              <div className="cents-bar__labels">
+                <span>-50</span>
+                <span>Perfect</span>
+                <span>+50</span>
               </div>
-            )}
+
+              <div className="cents-bar__track">
+                <div className="cents-bar__center" />
+                <div
+                  className="cents-bar__marker"
+                  style={{
+                    left: `${Math.max(0, Math.min(100, (((distanceCents ?? 0) + 50) / 100) * 100))}%`,
+                    opacity: distanceCents == null ? 0 : 1
+                  }}
+                />
+              </div>
+            </div>
           </span>
           <span className="pitch-clarity">Clarity: {Math.round((pitchResult.clarity ?? 0) * 100)}%</span>
+          {pitchResult.debugReason && <span className="pitch-debug">Debug: {pitchResult.debugReason}</span>}
         </div>
       </div>
     </div>

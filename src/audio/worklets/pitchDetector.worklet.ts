@@ -7,7 +7,6 @@ type PitchMessage =
 
 type ControlMessage =
   | { type: 'config'; windowSize: number; analysisIntervalMs: number }
-  | { type: 'hint'; targetMidi: number | null }
 
 class PitchDetectorProcessor extends AudioWorkletProcessor {
   private windowSize = 4096
@@ -20,8 +19,6 @@ class PitchDetectorProcessor extends AudioWorkletProcessor {
 
   private hopSamples = Math.max(1, Math.round(sampleRate * (this.analysisIntervalMs / 1000)))
   private samplesSinceLast = 0
-
-  private targetMidi: number | null = null
 
   constructor(options?: AudioWorkletNodeOptions) {
     super()
@@ -40,8 +37,6 @@ class PitchDetectorProcessor extends AudioWorkletProcessor {
         if (typeof msg.windowSize === 'number' && msg.windowSize > 0) this.windowSize = msg.windowSize
         if (typeof msg.analysisIntervalMs === 'number' && msg.analysisIntervalMs > 0) this.analysisIntervalMs = msg.analysisIntervalMs
         this.rebuildBuffers()
-      } else if (msg.type === 'hint') {
-        this.targetMidi = typeof msg.targetMidi === 'number' ? msg.targetMidi : null
       }
     }
 
@@ -95,9 +90,8 @@ class PitchDetectorProcessor extends AudioWorkletProcessor {
 
       this.snapshotWindow()
 
-      const hint = this.targetMidi != null ? { targetMidi: this.targetMidi } : undefined
       const t0 = (globalThis as any).performance?.now?.()
-      const r = detectPitch(this.window, sampleRate, hint)
+      const r = detectPitch(this.window, sampleRate)
       const t1 = (globalThis as any).performance?.now?.()
 
       // currentTime is block start; include block duration to approximate end time.

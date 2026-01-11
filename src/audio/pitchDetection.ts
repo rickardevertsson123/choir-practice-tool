@@ -1,5 +1,5 @@
 // Pitch detection using normalized autocorrelation (NACF) + parabolic interpolation.
-// Target-aware only for search range (±3 semitones), never "snaps" pitch to target.
+// Target-aware only for NACF search range (±3 semitones), never "snaps" pitch to target.
 // Includes an internal spike gate to suppress 1-frame pitch jumps (e.g. at note boundaries).
 //
 // Performance notes:
@@ -10,9 +10,12 @@
  * Copyright (c) 2025 Rickard Evertsson
  */
 
+import { PitchDetector } from 'pitchy';
+
 export interface PitchResult {
   frequency: number | null; // null if no stable pitch detected
   clarity: number;          // 0-1, confidence of detection
+  debugReason?: string | null; // optional UI/debug info
 }
 
 export interface TargetHint {
@@ -31,7 +34,7 @@ const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 
 // ---------- Tunables ----------
 const DEFAULT_MIN_FREQ = 80;      // Hz
 const DEFAULT_MAX_FREQ = 1000;    // Hz
-const TARGET_SEMITONE_SPAN = 3;   // ±3 semitones search window when targetHint exists
+const TARGET_SEMITONE_SPAN = 3;   // ±3 semitones search window when targetHint exists (NACF path only)
 
 // Energy / clarity thresholds
 const RMS_THRESHOLD = 0.005;      // you said you set this for testing; keep it here
@@ -72,6 +75,27 @@ const ws: Workspace = {
   prefixEnergy: new Float64Array(0),
 };
 
+// Pitchy workspace: reuse one detector instance per buffer size.
+let pitchyDetectorN = 0;
+let pitchyDetector: PitchDetector<Float32Array> | null = null;
+function getPitchyDetector(n: number): PitchDetector<Float32Array> {
+  if (!pitchyDetector || pitchyDetectorN !== n) {
+    pitchyDetector = PitchDetector.forFloat32Array(n);
+    pitchyDetectorN = n;
+  }
+  return pitchyDetector;
+}
+
+export type DetectorKind = 'nacf' | 'pitchy';
+
+// Exported for A/B testing / future re-enable (avoids TS noUnusedLocals in builds).
+export function getDetectorKind(): DetectorKind {
+  // Vite exposes env vars on import.meta.env (only keys with VITE_ prefix).
+  // We read defensively so this module remains safe in AudioWorklet bundles too.
+  const raw = String(((import.meta as any)?.env?.VITE_PITCH_DETECTOR ?? 'pitchy')).toLowerCase();
+  return raw === 'nacf' ? 'nacf' : 'pitchy';
+}
+
 function ensureWorkspace(n: number): Workspace {
   if (ws.n === n) return ws;
 
@@ -93,8 +117,12 @@ function ensureWorkspace(n: number): Workspace {
   return ws;
 }
 
-export function resetPitchDetectorState() {
-  state.lastStableMidi = null;
+export function resetPitchDetectorState(opts?: { seedMidi?: number }) {
+  // Optional: seed the detector with an expected MIDI so the very next frame
+  // can't "accept" a wildly wrong pitch immediately after a reset (common at
+  // note boundaries / attacks). When seeded, the spike-gate will hold until
+  // a large jump is confirmed for multiple frames.
+  state.lastStableMidi = typeof opts?.seedMidi === 'number' ? opts.seedMidi : null;
   state.pendingJumpMidi = null;
   state.pendingJumpCount = 0;
 }
@@ -198,7 +226,9 @@ function parabolicInterpolatePeak(
 }
 
 function applySpikeGate(exactMidi: number): number {
-  // If we don't have a stable midi yet, accept immediately
+  // If we don't have a stable midi yet, accept immediately.
+  // (Callers can seed lastStableMidi via resetPitchDetectorState({ seedMidi }) to avoid
+  // immediate acceptance of a wrong first frame at transitions.)
   if (state.lastStableMidi == null) {
     state.lastStableMidi = exactMidi;
     state.pendingJumpMidi = null;
@@ -251,7 +281,8 @@ function applySpikeGate(exactMidi: number): number {
  * - Never "snaps" to target: it just constrains the lag range
  * - Returns frequency + clarity
  */
-export function detectPitch(
+// Exported for A/B testing / future re-enable (avoids TS noUnusedLocals in builds).
+export function detectPitchNacf(
   buffer: Float32Array,
   sampleRate: number,
   targetHint?: TargetHint
@@ -312,10 +343,62 @@ export function detectPitch(
 
   // Spike gate in MIDI domain (suppresses 1-frame jumps)
   const exactMidi = freqToExactMidi(frequency);
+  // If we have a target hint but no stable state yet (e.g. after silence),
+  // anchor the gate to the target so we don't accept a random wrong pitch on
+  // the very first frame.
+  if (state.lastStableMidi == null && targetHint && typeof targetHint.targetMidi === 'number') {
+    state.lastStableMidi = targetHint.targetMidi;
+  }
   const gatedMidi = applySpikeGate(exactMidi);
   const gatedFreq = midiToFreq(gatedMidi);
 
   return { frequency: gatedFreq, clarity };
+}
+
+function detectPitchPitchy(
+  buffer: Float32Array,
+  sampleRate: number,
+  _targetHint?: TargetHint
+): PitchResult {
+  const n = buffer.length;
+  if (n === 0) return { frequency: null, clarity: 0 };
+
+  // Keep our RMS gate to avoid nonsense output on near-silence.
+  let sumSq = 0;
+  for (let i = 0; i < n; i++) sumSq += buffer[i] * buffer[i];
+  const rms = Math.sqrt(sumSq / n);
+  if (rms < RMS_THRESHOLD) return { frequency: null, clarity: 0 };
+
+  const detector = getPitchyDetector(n);
+  const [pitch, c] = detector.findPitch(buffer, sampleRate);
+  const clarity = clamp(typeof c === 'number' ? c : 0, 0, 1);
+
+  let frequency =
+    typeof pitch === 'number' && Number.isFinite(pitch) && pitch > 0 ? pitch : null;
+
+  // Sanity clamp
+  if (frequency != null && (frequency < DEFAULT_MIN_FREQ || frequency > DEFAULT_MAX_FREQ)) {
+    frequency = null;
+  }
+
+  // NOTE: For "raw pitchy" evaluation we intentionally do NOT apply:
+  // - target-based rejection
+  // - spike gate / seeding
+  // Callers can still gate on MIN_CLARITY and RMS_THRESHOLD externally.
+  return { frequency, clarity };
+}
+
+export function detectPitch(
+  buffer: Float32Array,
+  sampleRate: number,
+  targetHint?: TargetHint
+): PitchResult {
+
+  //const kind = getDetectorKind();
+  //return kind === 'pitchy'
+  //  ? detectPitchPitchy(buffer, sampleRate, targetHint)
+  //  : detectPitchNacf(buffer, sampleRate, targetHint);
+  return detectPitchPitchy(buffer, sampleRate, targetHint);
 }
 
 /**

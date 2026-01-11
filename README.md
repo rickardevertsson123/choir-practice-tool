@@ -26,7 +26,7 @@ Summary
 Key features
 - Score rendering in `#score-container` using OpenSheetMusicDisplay
 - Playback and voice mixing via `ScorePlayer`
-- Pitch detection using autocorrelation in `src/audio/pitchDetection.ts`
+- Pitch detection in `src/audio/pitchDetection.ts` (switchable backend via env flag)
 - Latency calibration utilities in `src/audio/latencyCalibration.ts` (speaker and headphone flows)
 
 Quick start
@@ -42,6 +42,10 @@ npm install
 ```bash
 npm run dev
 ```
+
+Pitch detector selection (A/B testing)
+- Default: `pitchy`
+- To force NACF: set `VITE_PITCH_DETECTOR=nacf` before starting Vite (then restart dev server)
 
 3. Open your browser at http://localhost:5173
 
@@ -72,6 +76,9 @@ Performance and troubleshooting
 Development tips
 - For lower main-thread CPU load at high tempos, consider moving `detectPitch` to a WebWorker or AudioWorklet.
 - For quick debugging, reduce `analyser.smoothingTimeConstant` in `handleMicToggle`.
+
+AudioWorklet requirement
+- Pitch detection now relies on **AudioWorklet only** (no Analyser/polling fallback). If the mic cannot be activated, verify that the browser supports AudioWorklet and that the page is served over HTTPS (or localhost).
 
 License & contributing
 This project is licensed under the GNU General Public License version 2 (GPL v2). Non-profit use is free provided the users comply with the terms of the GPL v2. If you or your organization want to use this code commercially (i.e., make money from it) and do not wish to comply with GPL v2, please contact babylonwizards@gmail.com to negotiate a commercial license.

@@ -15,7 +15,7 @@ import {
 } from '../utils/musicXmlParser'
 
 import { ScorePlayer, VoiceMixerSettings } from '../audio/ScorePlayer'
-import { detectPitch, frequencyToNoteInfo, PitchResult, resetPitchDetectorState } from '../audio/pitchDetection'
+import { frequencyToNoteInfo, PitchResult, resetPitchDetectorState } from '../audio/pitchDetection'
 import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCalibration'
 
 import './ScorePlayerPage.css'
@@ -34,9 +34,7 @@ const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 
 const FFT_SIZE              = 4096 // 4096 bytes => 93 ms
 const ANALYSIS_INTERVAL_MS  = 50   // Periodic analysis
 //const MIN_CLARITY           = 0.7  // Pitch gating
-//const RED_THRESHOLD_CENTS   = 45;  // When to paint red
-//const TRANSITION_WINDOW_SEC = 0.15 // Transition window (your setting)
-//const TRANSITION_GRACE_MS   = 150; // Transition grace
+//const ORANGE_THRESHOLD_CENTS   = 45;  // When to paint orange (off-pitch)
 
 function midiToNoteName(midi: number): string {
   const noteIndex = ((midi % 12) + 12) % 12
@@ -49,41 +47,49 @@ function clamp(v: number, min: number, max: number) {
 }
 
 export default function ScorePlayerPage() {
-  /* =========================
-     DEBUG
-  ========================= */
-  const DEBUG_PITCH = false
+  // Evaluation mode:
+  // - false (default): evaluate pitch vs nearest semitone (raw intonation), no score target note.
+  // - true: evaluate vs score target note (requires target selection code below).
+  const USE_TARGET_NOTE = String(import.meta.env.VITE_USE_TARGET_NOTE ?? 'false').toLowerCase() === 'true'
 
-  const lastDbgRef = useRef({
-    lastTargetsKey: '',
-    lastLogMs: 0
-  })
+  // Async transition gate + debug overlay
+  const ENABLE_ASYNC_TRANSITION =
+    String(import.meta.env.VITE_ENABLE_ASYNC_TRANSITION ?? 'true').toLowerCase() !== 'false'
+  const SHOW_PITCH_DEBUG = String(import.meta.env.VITE_PITCH_DEBUG ?? 'false').toLowerCase() === 'true'
 
-  function dbgLog(obj: any) {
-    if (!DEBUG_PITCH) return
-    const now = performance.now()
-    // max 10 logs/sec so the console doesn't get overwhelmed
-    if (now - lastDbgRef.current.lastLogMs < 100) return
-    lastDbgRef.current.lastLogMs = now
-    console.log(obj)
-  }
+  // Allowed score notes window (for "note correctness" without hinting pitch detection).
+  // We compare the *nearest semitone* (rounded MIDI) against all target notes within this window.
+  const ALLOWED_TARGET_WINDOW_SEC = Number(import.meta.env.VITE_ALLOWED_TARGET_WINDOW_SEC ?? '0.25')
 
   type Difficulty = 'easy' | 'medium' | 'hard';
 
   type PitchSettings = {
     MIN_CLARITY: number;
-    RED_THRESHOLD_CENTS: number;
-    TRANSITION_WINDOW_SEC: number;
-    TRANSITION_GRACE_MS: number;
+    ORANGE_THRESHOLD_CENTS: number;
   };
 
-  const DIFFICULTY_PRESETS: Record<Difficulty, PitchSettings> = {
-    easy:   { MIN_CLARITY: 0.50, RED_THRESHOLD_CENTS: 85, TRANSITION_WINDOW_SEC: 0.15, TRANSITION_GRACE_MS: 150 },
-    medium: { MIN_CLARITY: 0.70, RED_THRESHOLD_CENTS: 45, TRANSITION_WINDOW_SEC: 0.15, TRANSITION_GRACE_MS: 150 },
-    hard:   { MIN_CLARITY: 0.75, RED_THRESHOLD_CENTS: 30, TRANSITION_WINDOW_SEC: 0.12, TRANSITION_GRACE_MS: 110 },
-  };
+  // NOTE:
+  // - In target-note mode, cents can be unbounded (you can be many semitones off),
+  //   so higher thresholds make sense.
+  // - In nearest-semitone mode, cents is always in [-50..+50], so thresholds must be <= 50
+  //   or we'll never draw "red" in the score.
+  const DIFFICULTY_PRESETS_TARGET: Record<Difficulty, PitchSettings> = {
+    easy:   { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 85 },
+    medium: { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 75 },
+    hard:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 30 },
+  }
 
-  const pitchSettingsRef = useRef<PitchSettings>(DIFFICULTY_PRESETS.medium);
+  const DIFFICULTY_PRESETS_NEAREST_SEMITONE: Record<Difficulty, PitchSettings> = {
+    // Keep these above typical vibrato (~±15 cents) so vibrato doesn't paint red.
+    easy:   { MIN_CLARITY: 0.85, ORANGE_THRESHOLD_CENTS: 90 },
+    medium: { MIN_CLARITY: 0.85, ORANGE_THRESHOLD_CENTS: 50 },
+    hard:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 20 },
+  }
+
+  const DIFFICULTY_PRESETS: Record<Difficulty, PitchSettings> =
+    USE_TARGET_NOTE ? DIFFICULTY_PRESETS_TARGET : DIFFICULTY_PRESETS_NEAREST_SEMITONE;
+
+  const pitchSettingsRef = useRef<PitchSettings>(DIFFICULTY_PRESETS.easy);
 
 
   /* =========================
@@ -114,12 +120,7 @@ export default function ScorePlayerPage() {
      REFS: AUDIO / MIC
   ========================= */
   const audioContextRef = useRef<AudioContext | null>(null)
-  const analyserRef = useRef<AnalyserNode | null>(null)
   const micStreamRef = useRef<MediaStream | null>(null)
-  const detectTimerRef = useRef<number | null>(null)
-  const detectLoopRunningRef = useRef(false)
-  const detectBufferRef = useRef<Float32Array | null>(null)
-  const detectWindowHalfSecRef = useRef<{ fftSize: number; sampleRate: number; halfWindowSec: number } | null>(null)
   const pitchWorkletNodeRef = useRef<AudioWorkletNode | null>(null)
   const pitchWorkletTapGainRef = useRef<GainNode | null>(null)
   const useWorkletRef = useRef(false)
@@ -140,22 +141,42 @@ export default function ScorePlayerPage() {
   const [perfSnapshot, setPerfSnapshot] = useState<PerfSnapshot | null>(null)
 
   /* =========================
-     REFS: PITCH / STABILISERING
+     REFS: PITCH
   ========================= */
-  const stableMidiRef = useRef<number | null>(null)
-  const lastHintMidiRef = useRef<number | null>(null)
-  const lastStableJudgeMidiRef = useRef<number | null>(null);
-  const lastStableCentsRef = useRef<number | null>(null);
-  const transitionGraceUntilMsRef = useRef<number>(0);
-  const lastTargetMidiForGraceRef = useRef<number | null>(null);
-  const noteHadEvaluationRef = useRef(false)
-  const lastNoteTargetRef = useRef<{ voice: VoiceId; midi: number; start: number; duration: number } | null>(null)
+  // Asynchronous transition detection (no explicit time window):
+  // We only look at two consecutive analyses (prev -> current), but we use
+  // hysteresis thresholds so we don't flap between stable/transition:
+  // - enter transition if delta > START
+  // - exit transition if delta < STOP
+  const transitionRef = useRef<{
+    lastExactMidi: number | null
+    inTransition: boolean
+  }>({
+    lastExactMidi: null,
+    inTransition: false
+  })
 
   // Trail throttling
   const TRAIL_MAX_HZ = 25
   const TRAIL_MIN_DX_PX = 1.5
   const lastTrailDrawMsRef = useRef<number>(0)
   const lastTrailXRef = useRef<number | null>(null)
+
+  // Trail confirmation gate: require consecutive frames before drawing.
+  // - offPitch (orange): 2 frames
+  // - wrongNote (red): 3 frames (more strict, avoids transient consonant/attack mislabels)
+  const trailConfirmRef = useRef<{
+    count: number
+    confirmed: boolean
+    lastKind: 'offPitch' | 'wrongNote' | null
+  }>({
+    count: 0,
+    confirmed: false,
+    lastKind: null
+  })
+
+  // Console debug throttling (so VITE_PITCH_DEBUG doesn't spam too hard).
+  const lastPitchDebugLogRef = useRef<{ lastMs: number; lastMsg: string }>({ lastMs: 0, lastMsg: '' })
 
   /* =========================
      STATE: APP
@@ -195,7 +216,7 @@ export default function ScorePlayerPage() {
 
   const [distanceCents, setDistanceCents] = useState<number | null>(null)
 
-  const [difficulty, setDifficulty] = useState<Difficulty>('medium');
+  const [difficulty, setDifficulty] = useState<Difficulty>('easy');
   const [aboutOpen, setAboutOpen] = useState(false)
 
   // Avoid unnecessary rerenders from the detect loop by only committing
@@ -282,7 +303,7 @@ export default function ScorePlayerPage() {
     ctx.clearRect(x, 0, canvas.width - x, canvas.height)
   }
 
-  const drawTrailAtPlayhead = (absCents: number) => {
+  const drawTrailAtPlayhead = (absCents: number, kind: 'offPitch' | 'wrongNote' = 'offPitch') => {
     if (!positionsReadyRef.current) return
     const S = pitchSettingsRef.current;
     const ctx = trailCtxRef.current
@@ -291,7 +312,7 @@ export default function ScorePlayerPage() {
     const container = scoreContainerRef.current
     if (!ctx || !canvas || !playhead || !container) return
 
-    if (absCents < S.RED_THRESHOLD_CENTS) return
+    if (absCents < S.ORANGE_THRESHOLD_CENTS) return
 
     const nowMs = performance.now()
     const minIntervalMs = 1000 / TRAIL_MAX_HZ
@@ -309,9 +330,12 @@ export default function ScorePlayerPage() {
     lastTrailDrawMsRef.current = nowMs
     lastTrailXRef.current = left
 
-    const effectiveCents = Math.max(0, absCents - S.RED_THRESHOLD_CENTS);
+    const effectiveCents = Math.max(0, absCents - S.ORANGE_THRESHOLD_CENTS);
     const alpha = clamp(effectiveCents / 100, 0, 0.3)
-    ctx.fillStyle = `rgba(239, 68, 68, ${alpha})`
+    // Orange = off pitch, Red = wrong note (not in allowed score window)
+    ctx.fillStyle = kind === 'wrongNote'
+      ? `rgba(239, 68, 68, ${alpha})`
+      : `rgba(249, 115, 22, ${alpha})`
     ctx.fillRect(left, top, 6, height)
   }
 
@@ -378,9 +402,6 @@ export default function ScorePlayerPage() {
       // (spike gate, pending jumps, stable midi, transition grace, etc.).
       resetPitchDetectorState()
       resetPitchEvaluationState()
-      // Stop ongoing detect loop during file reinitialization; we'll restart it
-      // below if the mic is still active and things are ready.
-      stopDetectLoop()
 
       // Build the position cache and wait for it to become ready before
       // restarting detection. `buildPositionCache` waits one animation frame
@@ -404,7 +425,6 @@ export default function ScorePlayerPage() {
         // restart detection only after positions are ready
         resetPitchDetectorState()
         resetPitchEvaluationState()
-        startDetectLoop()
       }
     } catch (err: any) {
       console.error(err)
@@ -554,8 +574,6 @@ export default function ScorePlayerPage() {
     setDistanceCents(null)
     lastEmittedDistanceRoundedRef.current = null
     lastEmittedPitchRef.current = null
-    stableMidiRef.current = null
-    lastHintMidiRef.current = null
 
     clearTrail()
 
@@ -652,62 +670,51 @@ export default function ScorePlayerPage() {
         }
       }
 
-      // Prefer AudioWorklet (Tier 4). Fallback to analyser polling when unsupported.
+      // Pitch detection is AudioWorklet-only (no Analyser/polling fallback).
       useWorkletRef.current = false
-      if (ctx.audioWorklet && typeof ctx.audioWorklet.addModule === 'function') {
-        try {
-          await ctx.audioWorklet.addModule(
-            new URL('../audio/worklets/pitchDetector.worklet.ts', import.meta.url)
-          )
-
-          const node = new AudioWorkletNode(ctx, 'pitch-detector', {
-            numberOfInputs: 1,
-            numberOfOutputs: 1,
-            outputChannelCount: [1],
-            processorOptions: { windowSize: FFT_SIZE, analysisIntervalMs: ANALYSIS_INTERVAL_MS }
-          })
-
-          // Ensure the node is "pulled" by the graph but keep it silent.
-          const tap = ctx.createGain()
-          tap.gain.value = 0
-
-          source.connect(node)
-          node.connect(tap)
-          tap.connect(ctx.destination)
-
-          pitchWorkletNodeRef.current = node
-          pitchWorkletTapGainRef.current = tap
-          analyserRef.current = null
-          useWorkletRef.current = true
-        } catch (e) {
-          console.warn('[pitch] audioWorklet init failed; falling back to analyser loop', e)
-          useWorkletRef.current = false
-        }
+      if (!ctx.audioWorklet || typeof ctx.audioWorklet.addModule !== 'function') {
+        throw new Error('AudioWorklet stöds inte i denna webbläsare (krävs).')
       }
 
-      if (!useWorkletRef.current) {
-        const analyser = ctx.createAnalyser()
-        analyser.fftSize = FFT_SIZE
-        analyser.smoothingTimeConstant = 0.1
-        source.connect(analyser)
-        analyserRef.current = analyser
+      try {
+        await ctx.audioWorklet.addModule(
+          new URL('../audio/worklets/pitchDetector.worklet.ts', import.meta.url)
+        )
+
+        const node = new AudioWorkletNode(ctx, 'pitch-detector', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          processorOptions: { windowSize: FFT_SIZE, analysisIntervalMs: ANALYSIS_INTERVAL_MS }
+        })
+
+        // Ensure the node is "pulled" by the graph but keep it silent.
+        const tap = ctx.createGain()
+        tap.gain.value = 0
+
+        source.connect(node)
+        node.connect(tap)
+        tap.connect(ctx.destination)
+
+        pitchWorkletNodeRef.current = node
+        pitchWorkletTapGainRef.current = tap
+        useWorkletRef.current = true
+      } catch (e) {
+        console.warn('[pitch] audioWorklet init failed', e)
+        throw new Error('Kunde inte starta AudioWorklet (krävs).')
       }
 
       setMicActive(true)
 
       setPitchResult({ frequency: null, clarity: 0 })
       setDistanceCents(null)
-      stableMidiRef.current = null
-      lastHintMidiRef.current = null
 
       // reset pitch detection internal gate too
       resetPitchDetectorState()
 
       // Start detection:
       // - worklet mode is event-driven (port messages)
-      // - analyser mode uses polling loop
       if (useWorkletRef.current && pitchWorkletNodeRef.current) {
-        stopDetectLoop()
         pitchWorkletNodeRef.current.port.onmessage = (ev: MessageEvent<any>) => {
           const handlerStartMs = performance.now()
           const data = ev.data
@@ -736,92 +743,52 @@ export default function ScorePlayerPage() {
           const analysisCenterAudioTimeSec =
             audioTimeSec != null ? Math.max(0, audioTimeSec - halfWindowSec) : null
 
-          const rawNow =
+          const rawNowScoreTime =
             analysisCenterAudioTimeSec != null && player
               ? player.getTimeAtAudioContextTime(analysisCenterAudioTimeSec)
               : (player?.getCurrentTime() ?? 0)
 
-          const pitchTime = rawNow - (latencyMsRef.current || 0) / 1000
+          // Score-time used for any "compare to score" logic (does not affect pitch detection).
+          const pitchTime = rawNowScoreTime - (latencyMsRef.current || 0) / 1000
 
-          // --- TARGET SELECTION (copied from detect loop, but driven by pitch messages) ---
-          let t0: { midi: number; start: number; duration: number } | null = null
-          let t1: { midi: number; start: number; duration: number } | null = null
-          let targetsCount = 0
+          // Optional: target-note selection from the score timeline.
+          // (Kept for later re-enable, but disabled by default for "raw pitchy" evaluation.)
+          if (USE_TARGET_NOTE) {
+            // --- TARGET SELECTION (single target only; no transition window) ---
+            let target: { midi: number; start: number; duration: number } | null = null
+            const currentTarget = currentTargetNoteRef.current
 
-          const currentTarget = currentTargetNoteRef.current
+            if (timeline && voice) {
+              const notes = notesByVoiceRef.current?.[voice] ?? []
+              const idxMap = notesIndexByVoiceRef.current
+              if (!(voice in idxMap)) idxMap[voice] = 0
+              let currentIdx = idxMap[voice]
 
-          if (timeline && voice) {
-            const notes = notesByVoiceRef.current?.[voice] ?? []
-            const idxMap = notesIndexByVoiceRef.current
-            if (!(voice in idxMap)) idxMap[voice] = 0
-            let currentIdx = idxMap[voice]
+              if (currentIdx < 0) currentIdx = 0
+              if (currentIdx >= notes.length) currentIdx = Math.max(0, notes.length - 1)
 
-            if (currentIdx < 0) currentIdx = 0
-            if (currentIdx >= notes.length) currentIdx = Math.max(0, notes.length - 1)
+              while (currentIdx < notes.length && pitchTime >= notes[currentIdx].end) currentIdx++
+              while (currentIdx > 0 && pitchTime < notes[currentIdx].start) currentIdx--
+              if (currentIdx >= notes.length) currentIdx = notes.length - 1
+              idxMap[voice] = currentIdx
+              if (notes.length === 0 || pitchTime < notes[0].start) currentIdx = -1
 
-            while (currentIdx < notes.length && pitchTime >= notes[currentIdx].end) currentIdx++
-            while (currentIdx > 0 && pitchTime < notes[currentIdx].start) currentIdx--
-            if (currentIdx >= notes.length) currentIdx = notes.length - 1
-            idxMap[voice] = currentIdx
-            if (notes.length === 0 || pitchTime < notes[0].start) currentIdx = -1
+              if (currentIdx >= 0) {
+                const cur = notes[currentIdx]
+                target = { midi: cur.midi, start: cur.start, duration: cur.duration }
+              }
 
-            if (currentIdx >= 0) {
-              const cur = notes[currentIdx]
-              const prev = notes[currentIdx - 1]
-              const next = notes[currentIdx + 1]
-
-              const includePrev = !!(prev && prev.midi !== cur.midi && pitchTime - S.TRANSITION_WINDOW_SEC <= cur.start)
-              const includeNext = !!(next && next.midi !== cur.midi && pitchTime + S.TRANSITION_WINDOW_SEC >= cur.end)
-
-              if (includePrev && includeNext) {
-                t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-                t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
-                targetsCount = 2
-              } else if (includePrev) {
-                t0 = { midi: prev!.midi, start: prev!.start, duration: prev!.duration }
-                t1 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-                targetsCount = 2
-              } else if (includeNext) {
-                t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-                t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
-                targetsCount = 2
+              if (target) {
+                if (!currentTarget || currentTarget.midi !== target.midi) {
+                  const next = { voice, midi: target.midi, start: target.start, duration: target.duration }
+                  currentTargetNoteRef.current = next
+                  setCurrentTargetNote(next)
+                }
               } else {
-                t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-                t1 = null
-                targetsCount = 1
-              }
-
-              if (targetsCount === 2 && t0!.midi === t1!.midi) {
-                t0 = t1
-                t1 = null
-                targetsCount = 1
-              }
-            }
-
-            if (targetsCount > 0) {
-              const uiTarget = targetsCount === 2 ? t1! : t0!
-
-              const prevMidi = lastTargetMidiForGraceRef.current
-              if (prevMidi == null) {
-                lastTargetMidiForGraceRef.current = uiTarget.midi
-              } else if (prevMidi !== uiTarget.midi) {
-                lastTargetMidiForGraceRef.current = uiTarget.midi
-
-                const noteMs = (uiTarget.duration ?? 0) * 1000
-                const dynamicGraceMs = Math.min(
-                  S.TRANSITION_GRACE_MS,
-                  Math.max(40, noteMs * 0.5)
-                )
-                transitionGraceUntilMsRef.current = performance.now() + dynamicGraceMs
-              }
-
-              // Feed hint back to worklet so it can narrow the search range.
-              pitchWorkletNodeRef.current?.port.postMessage({ type: 'hint', targetMidi: uiTarget.midi })
-
-              if (!currentTarget || currentTarget.midi !== uiTarget.midi) {
-                const next = { voice, midi: uiTarget.midi, start: uiTarget.start, duration: uiTarget.duration }
-                currentTargetNoteRef.current = next
-                setCurrentTargetNote(next)
+                if (currentTarget) {
+                  currentTargetNoteRef.current = null
+                  setCurrentTargetNote(null)
+                }
               }
             } else {
               if (currentTarget) {
@@ -830,93 +797,319 @@ export default function ScorePlayerPage() {
               }
             }
           } else {
-            if (currentTarget) {
+            // In "nearest semitone" mode we don't use score targets.
+            if (currentTargetNoteRef.current) {
               currentTargetNoteRef.current = null
               setCurrentTargetNote(null)
             }
           }
 
           // --- PITCH RESULT + CENTS/JUDGEMENT (reuse existing page logic) ---
-          const result = { frequency: data.frequency ?? null, clarity: data.clarity ?? 0 }
+          const result = { frequency: data.frequency ?? null, clarity: data.clarity ?? 0 } as PitchResult
 
-          // Reuse the same throttling used in the polling loop.
-          const lastPitch = lastEmittedPitchRef.current
-          const nextHz10 = result.frequency != null ? Math.round(result.frequency * 10) : null
-          const lastHz10 = lastPitch?.frequency != null ? Math.round(lastPitch.frequency * 10) : null
-          const nextClarityPct = Math.round((result.clarity ?? 0) * 100)
-          const lastClarityPct = Math.round(((lastPitch?.clarity ?? 0)) * 100)
-          if (nextHz10 !== lastHz10 || nextClarityPct !== lastClarityPct) {
-            lastEmittedPitchRef.current = result
-            setPitchResult(result)
-          }
-
-          const inTransitionGrace = performance.now() < transitionGraceUntilMsRef.current
+          
+          // Throttle UI state updates so we don't rerender on every worklet tick.
+          //const lastPitch = lastEmittedPitchRef.current
+          //const nextHz10 = result.frequency != null ? Math.round(result.frequency * 10) : null
+          //const lastHz10 = lastPitch?.frequency != null ? Math.round(lastPitch.frequency * 10) : null
+          //const nextClarityPct = Math.round((result.clarity ?? 0) * 100)
+          //const lastClarityPct = Math.round(((lastPitch?.clarity ?? 0)) * 100)
+          //if (nextHz10 !== lastHz10 || nextClarityPct !== lastClarityPct) {
+          //  lastEmittedPitchRef.current = result
+          //  setPitchResult(result)
+          //}
           const isStableSignal = result.frequency != null && result.clarity >= S.MIN_CLARITY
 
-          if (result.frequency && targetsCount > 0) {
+          const uiTarget = currentTargetNoteRef.current
+          if (isStableSignal && result.frequency != null) {
             const noteInfo = frequencyToNoteInfo(result.frequency)
-            if (noteInfo) {
-              const rawMidi = noteInfo.exactMidi
+            const exactMidi = noteInfo?.exactMidi ?? null
+            const nearestMidi = exactMidi != null ? Math.round(exactMidi) : null
 
-              const hintMidi = targetsCount > 0 ? (targetsCount === 2 ? t1!.midi : t0!.midi) : undefined
-              if (lastHintMidiRef.current == null || lastHintMidiRef.current !== hintMidi) {
-                stableMidiRef.current = null
-                lastHintMidiRef.current = hintMidi ?? null
-                resetPitchDetectorState()
-              }
+            // Build allowed target set within a small time window around pitchTime.
+            // This is "note correctness" only (no hinting of pitch detection).
+            let isAllowedNoteInWindow = true
+            // Debug helper: when we flag "note not in window", capture which notes were in the window.
+            let debugWindowMidis: number[] | null = null
+            let debugWindowStartT: number | null = null
+            let debugWindowEndT: number | null = null
+            let debugClosestAllowed: { midi: number; distCents: number } | null = null
+            let closestAllowedDistCents: number | null = null
+            let nearMissOfAllowed = false
+            if (timeline && voice && Number.isFinite(ALLOWED_TARGET_WINDOW_SEC) && ALLOWED_TARGET_WINDOW_SEC > 0) {
+              const notes = notesByVoiceRef.current?.[voice] ?? []
+              if (notes.length > 0 && nearestMidi != null) {
+                const startT = pitchTime - ALLOWED_TARGET_WINDOW_SEC
+                const endT = pitchTime + ALLOWED_TARGET_WINDOW_SEC
+                debugWindowStartT = startT
+                debugWindowEndT = endT
 
-              const prevStable = stableMidiRef.current
-              const alpha = 0.35
-              const stableMidi = prevStable == null ? rawMidi : prevStable * (1 - alpha) + rawMidi * alpha
-              stableMidiRef.current = stableMidi
+                const idxMap = notesIndexByVoiceRef.current
+                if (!(voice in idxMap)) idxMap[voice] = 0
+                let i = idxMap[voice]
+                if (i < 0) i = 0
+                if (i >= notes.length) i = Math.max(0, notes.length - 1)
 
-              const judgeMidi = rawMidi
-              const TRANSITION_PAD_CENTS = 30
-              const padMidi = TRANSITION_PAD_CENTS / 100
+                while (i < notes.length && pitchTime >= notes[i].end) i++
+                while (i > 0 && pitchTime < notes[i].start) i--
+                if (i >= notes.length) i = notes.length - 1
+                idxMap[voice] = i
 
-              let bestCents: number | null = null
-              if (targetsCount === 1) {
-                bestCents = (judgeMidi - t0!.midi) * 100
-              } else {
-                const m0 = t0!.midi
-                const m1 = t1!.midi
-                const lowMidi = Math.min(m0, m1)
-                const highMidi = Math.max(m0, m1)
-                const low = lowMidi - padMidi
-                const high = highMidi + padMidi
-                if (judgeMidi >= low && judgeMidi <= high) bestCents = 0
-                else if (judgeMidi < low) bestCents = (judgeMidi - lowMidi) * 100
-                else bestCents = (judgeMidi - highMidi) * 100
-              }
+                let left = i
+                while (left > 0 && notes[left - 1].end >= startT) left--
+                let right = i
+                while (right < notes.length && notes[right].start <= endT) right++
 
-              if (isStableSignal && bestCents != null) {
-                lastStableJudgeMidiRef.current = judgeMidi
-                lastStableCentsRef.current = bestCents
-              }
+                isAllowedNoteInWindow = false
+                let closestCents = Infinity
+                let closestMidi: number | null = null
+                for (let k = left; k < right; k++) {
+                  const n = notes[k]
+                  if (n.end < startT || n.start > endT) continue
+                  if (exactMidi != null) {
+                    const dc = Math.abs((exactMidi - n.midi) * 100)
+                    if (dc < closestCents) {
+                      closestCents = dc
+                      closestMidi = n.midi
+                    }
+                  }
+                  if (n.midi === nearestMidi) {
+                    isAllowedNoteInWindow = true
+                    break
+                  }
+                }
 
-              const effectiveCents =
-                isStableSignal && bestCents != null ? bestCents : lastStableCentsRef.current
+                if (SHOW_PITCH_DEBUG && closestMidi != null && Number.isFinite(closestCents)) {
+                  debugClosestAllowed = { midi: closestMidi, distCents: closestCents }
+                }
+                if (closestMidi != null && Number.isFinite(closestCents)) {
+                  closestAllowedDistCents = closestCents
+                }
 
-              const lastRounded = lastEmittedDistanceRoundedRef.current
-              const nextRounded = effectiveCents == null ? null : Math.round(effectiveCents)
-              if (nextRounded !== lastRounded) {
-                lastEmittedDistanceRoundedRef.current = nextRounded
-                setDistanceCents(effectiveCents)
-              }
+                nearMissOfAllowed =
+                  !isAllowedNoteInWindow &&
+                  typeof closestAllowedDistCents === 'number' &&
+                  Number.isFinite(closestAllowedDistCents) &&
+                  closestAllowedDistCents < 90
 
-              if (player?.isPlaying() && isStableSignal && !inTransitionGrace && effectiveCents != null) {
-                const abs = Math.abs(effectiveCents)
-                if (abs >= S.RED_THRESHOLD_CENTS) drawTrailAtPlayhead(abs)
+                if (SHOW_PITCH_DEBUG && !isAllowedNoteInWindow) {
+                  debugWindowMidis = []
+                  for (let k = left; k < right && debugWindowMidis.length < 10; k++) {
+                    const n = notes[k]
+                    if (n.end < startT || n.start > endT) continue
+                    if (!debugWindowMidis.includes(n.midi)) debugWindowMidis.push(n.midi)
+                  }
+                }
               }
             }
-          } else {
+
+            let inAsyncTransition = false
+            if (ENABLE_ASYNC_TRANSITION) {
+              // --- ASYNC TRANSITION DETECTION ---
+              // Vibrato guidance: 4–6 Hz with ±15 cents means per-50ms tick deltas are
+              // usually below ~30 cents. We set thresholds above that so vibrato doesn't
+              // trigger transition mode.
+              const TRANSITION_START_CENTS = 50
+              const TRANSITION_STOP_CENTS = 30
+              const prevExact = transitionRef.current.lastExactMidi
+              const prevInTransition = transitionRef.current.inTransition
+
+              // Update history for next tick (after we've captured prevExact above)
+              if (exactMidi != null) transitionRef.current.lastExactMidi = exactMidi
+
+              if (exactMidi == null || prevExact == null) {
+                // If we don't have enough info, treat as unstable for judgement.
+                transitionRef.current.inTransition = true
+                inAsyncTransition = true
+              } else {
+                const deltaCents = Math.abs((exactMidi - prevExact) * 100)
+
+                // Hysteresis: larger threshold to enter transition, smaller to exit.
+                if (prevInTransition) {
+                  if (deltaCents < TRANSITION_STOP_CENTS) {
+                    transitionRef.current.inTransition = false
+                    inAsyncTransition = false
+                  } else {
+                    transitionRef.current.inTransition = true
+                    inAsyncTransition = true
+                  }
+                } else {
+                  if (deltaCents > TRANSITION_START_CENTS) {
+                    transitionRef.current.inTransition = true
+                    inAsyncTransition = true
+                  } else {
+                    transitionRef.current.inTransition = false
+                    inAsyncTransition = false
+                  }
+                }
+              }
+            }
+
+            const cents = !inAsyncTransition && exactMidi != null
+              ? (USE_TARGET_NOTE && uiTarget
+                  ? (exactMidi - uiTarget.midi) * 100
+                  : (exactMidi - Math.round(exactMidi)) * 100)
+              : null
+
             const lastRounded = lastEmittedDistanceRoundedRef.current
-            const nextRounded = lastStableCentsRef.current == null ? null : Math.round(lastStableCentsRef.current)
+            const nextRounded = cents == null ? null : Math.round(cents)
             if (nextRounded !== lastRounded) {
               lastEmittedDistanceRoundedRef.current = nextRounded
-              setDistanceCents(lastStableCentsRef.current)
+              setDistanceCents(cents)
+            }
+
+            if (player?.isPlaying() && cents != null) {
+              const trailKind: 'offPitch' | 'wrongNote' =
+                (!isAllowedNoteInWindow && !nearMissOfAllowed) ? 'wrongNote' : 'offPitch'
+
+              // If we're extremely far from the closest allowed note (e.g. ~octave/subharmonic glitch),
+              // don't draw purple/red at all for that frame.
+              const isHugeMismatch =
+                !isAllowedNoteInWindow &&
+                typeof closestAllowedDistCents === 'number' &&
+                Number.isFinite(closestAllowedDistCents) &&
+                closestAllowedDistCents >= 1000
+
+              const abs =
+                // If sung note isn't allowed, but it's close to some allowed note center, treat it as intonation.
+                nearMissOfAllowed
+                  ? closestAllowedDistCents!
+                  : (!isAllowedNoteInWindow
+                      // Otherwise treat as "wrong note" for score marking (even if cents≈0).
+                      ? (S.ORANGE_THRESHOLD_CENTS + 100)
+                      : Math.abs(cents))
+
+              if (isHugeMismatch) {
+                // Treat as unreliable frame; reset confirmation and skip drawing.
+                trailConfirmRef.current.count = 0
+                trailConfirmRef.current.confirmed = false
+                trailConfirmRef.current.lastKind = null
+              } else if (abs >= S.ORANGE_THRESHOLD_CENTS) {
+                // Require consecutive frames before we start drawing.
+                const required = trailKind === 'wrongNote' ? 3 : 2
+                if (trailConfirmRef.current.lastKind !== trailKind) {
+                  trailConfirmRef.current.lastKind = trailKind
+                  trailConfirmRef.current.count = 0
+                  trailConfirmRef.current.confirmed = false
+                }
+                if (!trailConfirmRef.current.confirmed) {
+                  trailConfirmRef.current.count += 1
+                  if (trailConfirmRef.current.count >= required) {
+                    trailConfirmRef.current.confirmed = true
+                    drawTrailAtPlayhead(abs, trailKind)
+                  }
+                } else {
+                  drawTrailAtPlayhead(abs, trailKind)
+                }
+              } else {
+                trailConfirmRef.current.count = 0
+                trailConfirmRef.current.confirmed = false
+                trailConfirmRef.current.lastKind = null
+              }
+            }
+
+            if (SHOW_PITCH_DEBUG) {
+              const reason =
+                exactMidi == null
+                  ? 'noteInfo null'
+                  : (ENABLE_ASYNC_TRANSITION && inAsyncTransition
+                      ? 'transition'
+                      : (!isAllowedNoteInWindow && !nearMissOfAllowed
+                          ? (() => {
+                              const sung = nearestMidi != null ? `${midiToNoteName(nearestMidi)}(${nearestMidi})` : 'unknown'
+                              const allowed =
+                                debugWindowMidis && debugWindowMidis.length
+                                  ? debugWindowMidis.map(m => `${midiToNoteName(m)}(${m})`).join(', ')
+                                  : 'none'
+                              const closest =
+                                debugClosestAllowed
+                                  ? `${midiToNoteName(debugClosestAllowed.midi)}(${debugClosestAllowed.midi})@${debugClosestAllowed.distCents.toFixed(0)}c`
+                                  : 'unknown'
+                              const win =
+                                debugWindowStartT != null && debugWindowEndT != null
+                                  ? `${debugWindowStartT.toFixed(2)}..${debugWindowEndT.toFixed(2)}`
+                                  : '?'
+                              return `note not in window; sung=${sung}; closest=${closest}; allowed=[${allowed}]; win=${win}`
+                            })()
+                          : (!isAllowedNoteInWindow && nearMissOfAllowed
+                              ? (() => {
+                                  const sung = nearestMidi != null ? `${midiToNoteName(nearestMidi)}(${nearestMidi})` : 'unknown'
+                                  const closest =
+                                    debugClosestAllowed
+                                      ? `${midiToNoteName(debugClosestAllowed.midi)}(${debugClosestAllowed.midi})@${debugClosestAllowed.distCents.toFixed(0)}c`
+                                      : 'unknown'
+                                  return `near miss (treat as intonation); sung=${sung}; closest=${closest}`
+                                })()
+                              : null)))
+              // Always show something when debug is enabled so it's obvious the flag is active.
+              result.debugReason = reason ?? 'ok'
+
+              // Console logging for "wrong note" cases (purple trail) since overlay is hard to read.
+              if (typeof result.debugReason === 'string' && result.debugReason.startsWith('note not in window')) {
+                const nowMs = performance.now()
+                const last = lastPitchDebugLogRef.current
+                // Throttle: max ~2 logs/sec and avoid repeating identical lines.
+                if (nowMs - last.lastMs > 200 && result.debugReason !== last.lastMsg) {
+                  lastPitchDebugLogRef.current = { lastMs: nowMs, lastMsg: result.debugReason }
+                  const hz = result.frequency != null ? result.frequency.toFixed(1) : 'null'
+                  const c = typeof cents === 'number' ? cents.toFixed(1) : 'null'
+                  // Expected score note at pitchTime (single-note view) for context.
+                  let expected: string = 'unknown'
+                  let expectedDelta: string = 'unknown'
+                  try {
+                    if (voice) {
+                      const notes = notesByVoiceRef.current?.[voice] ?? []
+                      if (notes.length > 0) {
+                        // Find current note at pitchTime (best-effort, O(1) amortized using idx map)
+                        const idxMap = notesIndexByVoiceRef.current
+                        if (!(voice in idxMap)) idxMap[voice] = 0
+                        let i = idxMap[voice]
+                        if (i < 0) i = 0
+                        if (i >= notes.length) i = Math.max(0, notes.length - 1)
+                        while (i < notes.length && pitchTime >= notes[i].end) i++
+                        while (i > 0 && pitchTime < notes[i].start) i--
+                        if (i >= notes.length) i = notes.length - 1
+                        idxMap[voice] = i
+                        const n = notes[i]
+                        if (pitchTime >= n.start && pitchTime < n.end) {
+                          expected = `${midiToNoteName(n.midi)}(${n.midi})`
+                          if (exactMidi != null) expectedDelta = `${((exactMidi - n.midi) * 100).toFixed(0)}c`
+                        }
+                      }
+                    }
+                  } catch {}
+                  console.log(
+                    `[pitch-debug] ${result.debugReason}; expected=${expected}; expectedDelta=${expectedDelta}; voice=${String(voice ?? 'null')}; hz=${hz}; cents=${c}; clarity=${Math.round((result.clarity ?? 0) * 100)}%; pitchTime=${pitchTime.toFixed(3)}`
+                  )
+                }
+              }
+            } else {
+              result.debugReason = null
+            }
+          } else {
+            // No freeze: if signal is unstable or no target, clear distance.
+            if (lastEmittedDistanceRoundedRef.current !== null) {
+              lastEmittedDistanceRoundedRef.current = null
+              setDistanceCents(null)
+            }
+
+            // Unstable/transition/no-frequency: reset confirmation so we don't
+            // "carry over" an off-pitch spike across gaps.
+            trailConfirmRef.current.count = 0
+            trailConfirmRef.current.confirmed = false
+            trailConfirmRef.current.lastKind = null
+
+            if (SHOW_PITCH_DEBUG) {
+              const reason =
+                result.frequency == null ? 'frequency null' : (result.clarity < S.MIN_CLARITY ? 'low clarity' : null)
+              result.debugReason = reason ?? 'ok'
+            } else {
+              result.debugReason = null
             }
           }
+
+          // Unthrottled UI update (you chose to keep it that way for now)
+          setPitchResult(result)
 
           // --- PERF: update counters from worklet messages ---
           const handlerEndMs = performance.now()
@@ -933,8 +1126,6 @@ export default function ScorePlayerPage() {
           if (detectMs < perfMinDetectMsRef.current) perfMinDetectMsRef.current = detectMs
           if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
         }
-      } else {
-        startDetectLoop()
       }
     } catch (err) {
       console.error(err)
@@ -943,10 +1134,6 @@ export default function ScorePlayerPage() {
   }
 
   function stopMic() {
-    // Stop any polling detect loop (fallback mode)
-    if (detectTimerRef.current) window.clearTimeout(detectTimerRef.current)
-    detectTimerRef.current = null
-    detectLoopRunningRef.current = false
     lastEmittedPitchRef.current = null
     lastEmittedDistanceRoundedRef.current = null
 
@@ -959,7 +1146,6 @@ export default function ScorePlayerPage() {
 
     micStreamRef.current?.getTracks().forEach(t => t.stop())
     micStreamRef.current = null
-    analyserRef.current = null
 
     setMicActive(false)
     setPitchResult({ frequency: null, clarity: 0 })
@@ -1107,375 +1293,10 @@ export default function ScorePlayerPage() {
   }, [scoreTimeline])
 
   function resetPitchEvaluationState() {
-    // pitch smoothing / hint
-    stableMidiRef.current = null;
-    lastHintMidiRef.current = null;
-
-    // freeze state
-    lastStableJudgeMidiRef.current = null;
-    lastStableCentsRef.current = null;
-
-    // transition + grace
-    lastTargetMidiForGraceRef.current = null;
-    transitionGraceUntilMsRef.current = 0;
-
-    // note-level fallback
-    noteHadEvaluationRef.current = false;
-    lastNoteTargetRef.current = null;
+    // Intentionally minimal for "raw pitchy" evaluation.
   }
 
-  /* =========================
-     PITCH LOOP (freeze + transition grace)
-  ========================= */
-  function startDetectLoop() {
-    if (detectLoopRunningRef.current) return
-    detectLoopRunningRef.current = true
-
-    const loop = () => {
-      const S = pitchSettingsRef.current;
-      const analyser = analyserRef.current
-      const ctx = audioContextRef.current
-      const timeline = timelineRef.current
-      const player = playerRef.current
-
-      if (!analyser || !ctx) {
-        detectTimerRef.current = window.setTimeout(loop, ANALYSIS_INTERVAL_MS)
-        return
-      }
-
-      const loopStartMs = performance.now()
-      const nowMs = loopStartMs
-
-      if (!detectBufferRef.current || detectBufferRef.current.length !== analyser.fftSize) {
-        detectBufferRef.current = new Float32Array(analyser.fftSize)
-      }
-      const buffer = detectBufferRef.current
-      // cast to any to avoid TypeScript DOM typing mismatch (ArrayBuffer vs SharedArrayBuffer)
-      analyser.getFloatTimeDomainData(buffer as any)
-
-      const sr = ctx.sampleRate
-      const fftSize = analyser.fftSize
-      const cached = detectWindowHalfSecRef.current
-      let halfWindowSec: number
-      if (cached && cached.fftSize === fftSize && cached.sampleRate === sr) {
-        halfWindowSec = cached.halfWindowSec
-      } else {
-        halfWindowSec = (fftSize / sr) / 2
-        detectWindowHalfSecRef.current = { fftSize, sampleRate: sr, halfWindowSec }
-      }
-
-      const rawNow = player?.getCurrentTime() ?? 0
-      const correctedNow = rawNow - (latencyMsRef.current || 0) / 1000
-      const pitchTime = correctedNow - halfWindowSec
-
-      const voice = selectedVoiceRef.current
-      const currentTarget = currentTargetNoteRef.current
-
-      /* =========================
-        TARGET SELECTION (optimized: two fixed slots)
-      ========================= */
-      let t0: { midi: number; start: number; duration: number } | null = null
-      let t1: { midi: number; start: number; duration: number } | null = null
-      let targetsCount = 0
-
-      if (timeline && voice) {
-        const notes = notesByVoiceRef.current?.[voice] ?? []
-
-        // Use a per-voice index that we advance/retreat instead of scanning
-        const idxMap = notesIndexByVoiceRef.current
-        if (!(voice in idxMap)) idxMap[voice] = 0
-        let currentIdx = idxMap[voice]
-
-        // clamp to valid range
-        if (currentIdx < 0) currentIdx = 0
-        if (currentIdx >= notes.length) currentIdx = Math.max(0, notes.length - 1)
-
-        // advance forward while pitchTime is beyond current note end
-        while (currentIdx < notes.length && pitchTime >= notes[currentIdx].end) {
-          currentIdx++
-        }
-
-        // step backward while pitchTime is before current note start
-        while (currentIdx > 0 && pitchTime < notes[currentIdx].start) {
-          currentIdx--
-        }
-
-        // if we fell off the end, set to last valid or -1 if none
-        if (currentIdx >= notes.length) currentIdx = notes.length - 1
-
-        // update stored index for this voice
-        idxMap[voice] = currentIdx
-
-        // if pitchTime is before the first note, mark not found
-        if (notes.length === 0 || pitchTime < notes[0].start) currentIdx = -1
-
-        if (currentIdx >= 0) {
-          const cur = notes[currentIdx]
-          const prev = notes[currentIdx - 1]
-          const next = notes[currentIdx + 1]
-
-          const includePrev = !!(prev && prev.midi !== cur.midi && pitchTime - S.TRANSITION_WINDOW_SEC <= cur.start)
-          const includeNext = !!(next && next.midi !== cur.midi && pitchTime + S.TRANSITION_WINDOW_SEC >= cur.end)
-
-          if (includePrev && includeNext) {
-            // prev, cur, next -> keep last two (cur, next)
-            t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-            t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
-            targetsCount = 2
-          } else if (includePrev) {
-            // prev, cur -> keep both
-            t0 = { midi: prev!.midi, start: prev!.start, duration: prev!.duration }
-            t1 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-            targetsCount = 2
-          } else if (includeNext) {
-            // cur, next -> keep both
-            t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-            t1 = { midi: next!.midi, start: next!.start, duration: next!.duration }
-            targetsCount = 2
-          } else {
-            // only cur
-            t0 = { midi: cur.midi, start: cur.start, duration: cur.duration }
-            t1 = null
-            targetsCount = 1
-          }
-
-          // If both targets are identical, keep only the latter
-          if (targetsCount === 2 && t0!.midi === t1!.midi) {
-            t0 = t1
-            t1 = null
-            targetsCount = 1
-          }
-        }
-
-        /* =========================
-          UI target + TRANSITION GRACE TRIGGER (A: target MIDI change)
-        ========================= */
-        if (targetsCount > 0) {
-          const uiTarget = targetsCount === 2 ? t1! : t0!
-
-          // Trigger grace only when target MIDI changes
-          const prevMidi = lastTargetMidiForGraceRef.current
-          if (prevMidi == null) {
-            lastTargetMidiForGraceRef.current = uiTarget.midi
-          } else if (prevMidi !== uiTarget.midi) {
-            lastTargetMidiForGraceRef.current = uiTarget.midi
-
-            const noteMs = (uiTarget.duration ?? 0) * 1000;
-
-            // Grace = min(fast max, 50% of the note's length), but never below 40ms
-            const dynamicGraceMs = Math.min(
-              S.TRANSITION_GRACE_MS,
-              Math.max(40, noteMs * 0.5)
-            );
-
-            transitionGraceUntilMsRef.current = nowMs + dynamicGraceMs
-          }
-
-          if (!currentTarget || currentTarget.midi !== uiTarget.midi) {
-            const next = { voice, midi: uiTarget.midi, start: uiTarget.start, duration: uiTarget.duration }
-            currentTargetNoteRef.current = next
-            setCurrentTargetNote(next)
-          }
-        } else {
-          if (currentTarget) {
-            currentTargetNoteRef.current = null
-            setCurrentTargetNote(null)
-          }
-        }
-      } else {
-        if (currentTarget) {
-          currentTargetNoteRef.current = null
-          setCurrentTargetNote(null)
-        }
-      }
-
-      const inTransitionGrace = nowMs < transitionGraceUntilMsRef.current
-
-      /* =========================
-        TARGET CHANGE DETECT (low-allocation)
-      ========================= */
-      let aMidi: number | null = null
-      let bMidi: number | null = null
-      if (targetsCount === 1) {
-        aMidi = t0!.midi
-      } else if (targetsCount === 2) {
-        const m0 = t0!.midi
-        const m1 = t1!.midi
-        aMidi = Math.min(m0, m1)
-        bMidi = Math.max(m0, m1)
-      }
-      const targetsKey = targetsCount === 0 ? '' : (targetsCount === 1 ? String(aMidi) : `${aMidi},${bMidi}`)
-      if (targetsKey !== lastDbgRef.current.lastTargetsKey) {
-        lastDbgRef.current.lastTargetsKey = targetsKey
-
-        // This reset is *behavioral* (not only debug): when targets change we
-        // want to clear smoothing + detector gates so old note state doesn't
-        // pollute new targets.
-        stableMidiRef.current = null
-        lastHintMidiRef.current = null
-        resetPitchDetectorState()
-
-        if (DEBUG_PITCH) {
-          dbgLog({
-            type: 'TARGETS_CHANGED',
-            rawNow: rawNow.toFixed(3),
-            correctedNow: correctedNow.toFixed(3),
-            pitchTime: pitchTime.toFixed(3),
-            targets: targetsCount === 0 ? [] : (targetsCount === 1 ? [aMidi!] : [aMidi!, bMidi!])
-          })
-        }
-      }
-
-      /* =========================
-        PITCH DETECTION
-      ========================= */
-      const hintMidi = targetsCount > 0 ? (targetsCount === 2 ? t1!.midi : t0!.midi) : undefined
-      // time detectPitch
-      const detectStart = performance.now()
-      const result = detectPitch(buffer, sr, hintMidi != null ? { targetMidi: hintMidi } : undefined)
-      const detectEnd = performance.now()
-      const detectMs = detectEnd - detectStart
-      perfLastDetectMsRef.current = detectMs
-      perfTotalDetectMsRef.current += detectMs
-      if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
-
-      const isStableSignal = result.frequency != null && result.clarity >= S.MIN_CLARITY
-      // Avoid rerenders when changes aren't user-visible.
-      // - UI prints Hz with 1 decimal and clarity as integer percent
-      // - so we only update state when those rounded values change
-      const lastPitch = lastEmittedPitchRef.current
-      const nextHz10 = result.frequency != null ? Math.round(result.frequency * 10) : null
-      const lastHz10 = lastPitch?.frequency != null ? Math.round(lastPitch.frequency * 10) : null
-      const nextClarityPct = Math.round((result.clarity ?? 0) * 100)
-      const lastClarityPct = Math.round(((lastPitch?.clarity ?? 0)) * 100)
-      if (nextHz10 !== lastHz10 || nextClarityPct !== lastClarityPct) {
-        lastEmittedPitchRef.current = result
-        setPitchResult(result)
-      }
-
-      /* =========================
-        CENTS + FREEZE LOGIC
-      ========================= */
-      if (result.frequency && targetsCount > 0) {
-        const noteInfo = frequencyToNoteInfo(result.frequency)
-        if (noteInfo) {
-          const rawMidi = noteInfo.exactMidi
-
-          if (lastHintMidiRef.current == null || lastHintMidiRef.current !== hintMidi) {
-            stableMidiRef.current = null
-            lastHintMidiRef.current = hintMidi ?? null
-            resetPitchDetectorState()
-          }
-
-          const prevStable = stableMidiRef.current
-          const alpha = 0.35
-          const stableMidi = prevStable == null ? rawMidi : prevStable * (1 - alpha) + rawMidi * alpha
-          stableMidiRef.current = stableMidi
-
-          const judgeMidi = rawMidi
-
-          const TRANSITION_PAD_CENTS = 30
-          const padMidi = TRANSITION_PAD_CENTS / 100
-
-          let bestCents: number | null = null
-
-          if (targetsCount === 1) {
-            const m = t0!.midi
-            // cents = 100 * (midiDiff)
-            bestCents = (judgeMidi - m) * 100
-          } else {
-            const m0 = t0!.midi
-            const m1 = t1!.midi
-            const lowMidi = Math.min(m0, m1)
-            const highMidi = Math.max(m0, m1)
-
-            const low = lowMidi - padMidi
-            const high = highMidi + padMidi
-
-            if (judgeMidi >= low && judgeMidi <= high) bestCents = 0
-            else if (judgeMidi < low) bestCents = (judgeMidi - lowMidi) * 100
-            else bestCents = (judgeMidi - highMidi) * 100
-          }
-
-          // Freeze: update last stable only when signal is stable AND we have a cents value
-          if (isStableSignal && bestCents != null) {
-            lastStableJudgeMidiRef.current = judgeMidi
-            lastStableCentsRef.current = bestCents
-          }
-
-          const effectiveCents =
-            isStableSignal && bestCents != null ? bestCents : lastStableCentsRef.current
-
-          // Avoid rerenders when the displayed value (rounded cents) is unchanged.
-          const lastRounded = lastEmittedDistanceRoundedRef.current
-          const nextRounded = effectiveCents == null ? null : Math.round(effectiveCents)
-          if (nextRounded !== lastRounded) {
-            lastEmittedDistanceRoundedRef.current = nextRounded
-            setDistanceCents(effectiveCents)
-          }
-
-          // Trail: only when stable AND not in transition grace
-          if (player?.isPlaying() && isStableSignal && !inTransitionGrace && effectiveCents != null) {
-            const abs = Math.abs(effectiveCents)
-            if (abs >= S.RED_THRESHOLD_CENTS) {
-              drawTrailAtPlayhead(abs)
-            }
-          }
-        } else {
-          const lastRounded = lastEmittedDistanceRoundedRef.current
-          const nextRounded = lastStableCentsRef.current == null ? null : Math.round(lastStableCentsRef.current)
-          if (nextRounded !== lastRounded) {
-            lastEmittedDistanceRoundedRef.current = nextRounded
-            setDistanceCents(lastStableCentsRef.current)
-          }
-        }
-      } else {
-        const lastRounded = lastEmittedDistanceRoundedRef.current
-        const nextRounded = lastStableCentsRef.current == null ? null : Math.round(lastStableCentsRef.current)
-        if (nextRounded !== lastRounded) {
-          lastEmittedDistanceRoundedRef.current = nextRounded
-          setDistanceCents(lastStableCentsRef.current)
-        }
-      }
-
-      const loopEndMs = performance.now()
-      const loopMs = loopEndMs - loopStartMs
-      perfLastLoopMsRef.current = loopMs
-      perfTotalLoopMsRef.current += loopMs
-      perfIterationsRef.current += 1
-      if (loopMs > perfMaxLoopMsRef.current) perfMaxLoopMsRef.current = loopMs
-      if (loopMs > ANALYSIS_INTERVAL_MS) perfSkippedRef.current += 1
-
-      detectTimerRef.current = window.setTimeout(loop, ANALYSIS_INTERVAL_MS)
-    }
-
-    loop()
-  }
-
-  function stopDetectLoop() {
-    if (detectTimerRef.current) {
-      window.clearTimeout(detectTimerRef.current)
-      detectTimerRef.current = null
-    }
-    detectLoopRunningRef.current = false
-
-    // Reset UI-throttling caches so next start emits immediately.
-    lastEmittedPitchRef.current = null
-    lastEmittedDistanceRoundedRef.current = null
-
-    // reset perf snapshot and counters
-    perfIterationsRef.current = 0
-    perfTotalLoopMsRef.current = 0
-    perfMinLoopMsRef.current = Infinity
-    perfMaxLoopMsRef.current = 0
-    perfLastLoopMsRef.current = 0
-    perfTotalDetectMsRef.current = 0
-    perfMinDetectMsRef.current = Infinity
-    perfMaxDetectMsRef.current = 0
-    perfLastDetectMsRef.current = 0
-    perfSkippedRef.current = 0
-    setPerfSnapshot(null)
-  }
+  // Pitch detection is AudioWorklet-only.
 
   // Snapshot perf to UI periodically while mic is active
   useEffect(() => {
@@ -1594,7 +1415,6 @@ export default function ScorePlayerPage() {
                 // Keep behavior identical to the old slider handler.
                 setCurrentTime(t)
                 resetPitchEvaluationState()
-                startDetectLoop()
                 playerRef.current?.seekTo(t)
               }}
             />
