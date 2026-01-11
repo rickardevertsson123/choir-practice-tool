@@ -711,7 +711,7 @@ export default function ScorePlayerPage() {
         pitchWorkletTapGainRef.current = tap
         useWorkletRef.current = true
       } catch (e) {
-        console.warn('[pitch] audioWorklet init failed', e)
+        console.warn('[pitch] audioWorklet init failed', e, 'workletUrl=', pitchDetectorWorkletUrl)
         throw new Error('Kunde inte starta AudioWorklet (krävs).')
       }
 
