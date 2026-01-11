@@ -11,4 +11,10 @@ interface ImportMeta {
   readonly env: ImportMetaEnv
 }
 
+// Vite asset URL imports (used for AudioWorklet modules in production builds)
+declare module '*?url' {
+  const url: string
+  export default url
+}
+
 

@@ -26,6 +26,9 @@ import { LatencyControl } from './scorePlayerPage/LatencyControl'
 import { TransportBar } from './scorePlayerPage/TransportBar'
 import { AboutModal } from './scorePlayerPage/AboutModal'
 
+// AudioWorklet must be loaded as a built asset URL in production (Vercel).
+import pitchDetectorWorkletUrl from '../audio/worklets/pitchDetector.worklet.ts?url'
+
 /* =========================
   CONSTANTS
 ========================= */
@@ -626,9 +629,19 @@ export default function ScorePlayerPage() {
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
-      })
+      let stream: MediaStream
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+        })
+      } catch (e: any) {
+        // Provide the real browser error (NotAllowedError, NotFoundError, NotReadableError, etc.)
+        console.error('[mic] getUserMedia failed', e)
+        const name = e?.name ? String(e.name) : 'UnknownError'
+        const msg = e?.message ? String(e.message) : ''
+        setError(`Microphone error: ${name}${msg ? ` - ${msg}` : ''}`)
+        return
+      }
       micStreamRef.current = stream
 
       if (!audioContextRef.current) audioContextRef.current = new AudioContext()
@@ -677,9 +690,7 @@ export default function ScorePlayerPage() {
       }
 
       try {
-        await ctx.audioWorklet.addModule(
-          new URL('../audio/worklets/pitchDetector.worklet.ts', import.meta.url)
-        )
+        await ctx.audioWorklet.addModule(pitchDetectorWorkletUrl)
 
         const node = new AudioWorkletNode(ctx, 'pitch-detector', {
           numberOfInputs: 1,
@@ -1127,9 +1138,11 @@ export default function ScorePlayerPage() {
           if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
         }
       }
-    } catch (err) {
-      console.error(err)
-      setError('Cannot active microphone. Check permissions.')
+    } catch (err: any) {
+      console.error('[mic] activation failed', err)
+      const name = err?.name ? String(err.name) : 'UnknownError'
+      const msg = err?.message ? String(err.message) : ''
+      setError(`Cannot activate microphone: ${name}${msg ? ` - ${msg}` : ''}`)
     }
   }
 
