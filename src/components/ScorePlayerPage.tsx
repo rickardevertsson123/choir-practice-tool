@@ -26,8 +26,9 @@ import { LatencyControl } from './scorePlayerPage/LatencyControl'
 import { TransportBar } from './scorePlayerPage/TransportBar'
 import { AboutModal } from './scorePlayerPage/AboutModal'
 
-// AudioWorklet must be loaded as a built asset URL in production (Vercel).
-import pitchDetectorWorkletUrl from '../audio/worklets/pitchDetector.worklet.ts?url'
+// AudioWorklet must be loaded as a built JS asset in production (Vercel).
+// Use Vite's worker bundling so TS is transpiled and dependencies are bundled.
+import pitchDetectorWorkletUrl from '../audio/worklets/pitchDetector.worklet.ts?worker&url'
 
 /* =========================
   CONSTANTS
