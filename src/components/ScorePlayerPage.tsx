@@ -65,7 +65,7 @@ export default function ScorePlayerPage() {
   // We compare the *nearest semitone* (rounded MIDI) against all target notes within this window.
   const ALLOWED_TARGET_WINDOW_SEC = Number(import.meta.env.VITE_ALLOWED_TARGET_WINDOW_SEC ?? '0.25')
 
-  type Difficulty = 'easy' | 'medium' | 'hard';
+  type Difficulty = 'normal' | 'advanced' | 'expert';
 
   type PitchSettings = {
     MIN_CLARITY: number;
@@ -78,22 +78,22 @@ export default function ScorePlayerPage() {
   // - In nearest-semitone mode, cents is always in [-50..+50], so thresholds must be <= 50
   //   or we'll never draw "red" in the score.
   const DIFFICULTY_PRESETS_TARGET: Record<Difficulty, PitchSettings> = {
-    easy:   { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 85 },
-    medium: { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 75 },
-    hard:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 30 },
+    normal:   { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 85 },
+    advanced: { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 75 },
+    expert:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 30 },
   }
 
   const DIFFICULTY_PRESETS_NEAREST_SEMITONE: Record<Difficulty, PitchSettings> = {
     // Keep these above typical vibrato (~±15 cents) so vibrato doesn't paint red.
-    easy:   { MIN_CLARITY: 0.85, ORANGE_THRESHOLD_CENTS: 90 },
-    medium: { MIN_CLARITY: 0.85, ORANGE_THRESHOLD_CENTS: 50 },
-    hard:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 20 },
+    normal:   { MIN_CLARITY: 0.85, ORANGE_THRESHOLD_CENTS: 90 },
+    advanced: { MIN_CLARITY: 0.85, ORANGE_THRESHOLD_CENTS: 50 },
+    expert:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 20 },
   }
 
   const DIFFICULTY_PRESETS: Record<Difficulty, PitchSettings> =
     USE_TARGET_NOTE ? DIFFICULTY_PRESETS_TARGET : DIFFICULTY_PRESETS_NEAREST_SEMITONE;
 
-  const pitchSettingsRef = useRef<PitchSettings>(DIFFICULTY_PRESETS.easy);
+  const pitchSettingsRef = useRef<PitchSettings>(DIFFICULTY_PRESETS.normal);
 
 
   /* =========================
@@ -220,7 +220,7 @@ export default function ScorePlayerPage() {
 
   const [distanceCents, setDistanceCents] = useState<number | null>(null)
 
-  const [difficulty, setDifficulty] = useState<Difficulty>('easy');
+  const [difficulty, setDifficulty] = useState<Difficulty>('normal');
   const [aboutOpen, setAboutOpen] = useState(false)
 
   // Avoid unnecessary rerenders from the detect loop by only committing
@@ -1454,9 +1454,9 @@ export default function ScorePlayerPage() {
               <label>
                 Difficulty:&nbsp;
                 <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
-                  <option value="easy">Easy</option>
-                  <option value="medium">Medium</option>
-                  <option value="hard">Hard</option>
+                  <option value="normal">Normal</option>
+                  <option value="advanced">Advanced</option>
+                  <option value="expert">Expert</option>
                 </select>
               </label>
 
