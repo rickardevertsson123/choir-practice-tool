@@ -2,6 +2,8 @@
  * Copyright (c) 2025 Rickard Evertsson
  */
 
+'use client'
+
 import { useEffect, useRef, useState } from 'react'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import JSZip from 'jszip'
@@ -17,8 +19,6 @@ import {
 import { ScorePlayer, VoiceMixerSettings } from '../audio/ScorePlayer'
 import { frequencyToNoteInfo, PitchResult, resetPitchDetectorState } from '../audio/pitchDetection'
 import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCalibration'
-
-import './ScorePlayerPage.css'
 import { PerfOverlay, PerfSnapshot } from './scorePlayerPage/PerfOverlay'
 import { PitchDetectorOverlay } from './scorePlayerPage/PitchDetectorOverlay'
 import { TunerPanel } from './scorePlayerPage/TunerPanel'
@@ -26,9 +26,7 @@ import { LatencyControl } from './scorePlayerPage/LatencyControl'
 import { TransportBar } from './scorePlayerPage/TransportBar'
 import { AboutModal } from './scorePlayerPage/AboutModal'
 
-// AudioWorklet must be loaded as a built JS asset in production (Vercel).
-// Use Vite's worker bundling so TS is transpiled and dependencies are bundled.
-import pitchDetectorWorkletUrl from '../audio/worklets/pitchDetector.worklet.ts?worker&url'
+const PITCH_WORKLET_URL = '/worklets/pitchDetector.worklet.js'
 
 /* =========================
   CONSTANTS
@@ -54,16 +52,16 @@ export default function ScorePlayerPage() {
   // Evaluation mode:
   // - false (default): evaluate pitch vs nearest semitone (raw intonation), no score target note.
   // - true: evaluate vs score target note (requires target selection code below).
-  const USE_TARGET_NOTE = String(import.meta.env.VITE_USE_TARGET_NOTE ?? 'false').toLowerCase() === 'true'
+  const USE_TARGET_NOTE = String(process.env.NEXT_PUBLIC_USE_TARGET_NOTE ?? 'false').toLowerCase() === 'true'
 
   // Async transition gate + debug overlay
   const ENABLE_ASYNC_TRANSITION =
-    String(import.meta.env.VITE_ENABLE_ASYNC_TRANSITION ?? 'true').toLowerCase() !== 'false'
-  const SHOW_PITCH_DEBUG = String(import.meta.env.VITE_PITCH_DEBUG ?? 'false').toLowerCase() === 'true'
+    String(process.env.NEXT_PUBLIC_ENABLE_ASYNC_TRANSITION ?? 'true').toLowerCase() !== 'false'
+  const SHOW_PITCH_DEBUG = String(process.env.NEXT_PUBLIC_PITCH_DEBUG ?? 'false').toLowerCase() === 'true'
 
   // Allowed score notes window (for "note correctness" without hinting pitch detection).
   // We compare the *nearest semitone* (rounded MIDI) against all target notes within this window.
-  const ALLOWED_TARGET_WINDOW_SEC = Number(import.meta.env.VITE_ALLOWED_TARGET_WINDOW_SEC ?? '0.25')
+  const ALLOWED_TARGET_WINDOW_SEC = Number(process.env.NEXT_PUBLIC_ALLOWED_TARGET_WINDOW_SEC ?? '0.25')
 
   type Difficulty = 'normal' | 'advanced' | 'expert';
 
@@ -679,7 +677,7 @@ export default function ScorePlayerPage() {
       }
 
       try {
-        await ctx.audioWorklet.addModule(pitchDetectorWorkletUrl)
+        await ctx.audioWorklet.addModule(PITCH_WORKLET_URL)
 
         const node = new AudioWorkletNode(ctx, 'pitch-detector', {
           numberOfInputs: 1,
@@ -700,7 +698,7 @@ export default function ScorePlayerPage() {
         pitchWorkletTapGainRef.current = tap
         useWorkletRef.current = true
       } catch (e) {
-        console.warn('[pitch] audioWorklet init failed', e, 'workletUrl=', pitchDetectorWorkletUrl)
+        console.warn('[pitch] audioWorklet init failed', e, 'workletUrl=', PITCH_WORKLET_URL)
         throw new Error('Kunde inte starta AudioWorklet (krävs).')
       }
 
