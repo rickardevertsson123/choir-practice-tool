@@ -72,17 +72,6 @@ export default function ScorePlayerPage() {
     ORANGE_THRESHOLD_CENTS: number;
   };
 
-  // NOTE:
-  // - In target-note mode, cents can be unbounded (you can be many semitones off),
-  //   so higher thresholds make sense.
-  // - In nearest-semitone mode, cents is always in [-50..+50], so thresholds must be <= 50
-  //   or we'll never draw "red" in the score.
-  const DIFFICULTY_PRESETS_TARGET: Record<Difficulty, PitchSettings> = {
-    normal:   { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 85 },
-    advanced: { MIN_CLARITY: 0.90, ORANGE_THRESHOLD_CENTS: 75 },
-    expert:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 30 },
-  }
-
   const DIFFICULTY_PRESETS_NEAREST_SEMITONE: Record<Difficulty, PitchSettings> = {
     // Keep these above typical vibrato (~±15 cents) so vibrato doesn't paint red.
     normal:   { MIN_CLARITY: 0.85, ORANGE_THRESHOLD_CENTS: 90 },
@@ -90,10 +79,9 @@ export default function ScorePlayerPage() {
     expert:   { MIN_CLARITY: 0.75, ORANGE_THRESHOLD_CENTS: 20 },
   }
 
-  const DIFFICULTY_PRESETS: Record<Difficulty, PitchSettings> =
-    USE_TARGET_NOTE ? DIFFICULTY_PRESETS_TARGET : DIFFICULTY_PRESETS_NEAREST_SEMITONE;
+  const DIFFICULTY_PRESETS: Record<Difficulty, PitchSettings> = DIFFICULTY_PRESETS_NEAREST_SEMITONE
 
-  const pitchSettingsRef = useRef<PitchSettings>(DIFFICULTY_PRESETS.normal);
+  const pitchSettingsRef = useRef<PitchSettings>(DIFFICULTY_PRESETS_NEAREST_SEMITONE.normal);
 
 
   /* =========================
