@@ -39,7 +39,61 @@ create table if not exists public.groups (
 
 alter table public.groups enable row level security;
 
--- For now: owner/admin console uses service_role (bypasses RLS).
--- Regular app group visibility will be added together with memberships in later steps.
+-- GROUP MEMBERSHIPS
+create table if not exists public.group_memberships (
+  group_id uuid not null references public.groups(id) on delete cascade,
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  role text not null check (role in ('admin', 'member')),
+  status text not null check (status in ('active', 'pending', 'rejected')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (group_id, user_id)
+);
+
+alter table public.group_memberships enable row level security;
+
+-- RLS: a user can see their own memberships.
+create policy "memberships_select_own"
+on public.group_memberships for select
+using (auth.uid() = user_id);
+
+-- RLS: allow creating a group if the user is not disabled.
+create policy "groups_insert_if_not_disabled"
+on public.groups for insert
+with check (
+  auth.uid() = created_by
+  and exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid() and p.disabled_at is null
+  )
+);
+
+-- RLS: allow the creator to see their created group row (needed immediately after insert).
+create policy "groups_select_creator"
+on public.groups for select
+using (created_by = auth.uid());
+
+-- RLS: allow selecting groups that the user is a member of (any status).
+create policy "groups_select_member"
+on public.groups for select
+using (
+  exists (
+    select 1 from public.group_memberships m
+    where m.group_id = groups.id and m.user_id = auth.uid()
+  )
+);
+
+-- RLS: allow inserting membership for yourself when creating a group (admin active).
+create policy "memberships_insert_own"
+on public.group_memberships for insert
+with check (
+  auth.uid() = user_id
+  and exists (
+    select 1 from public.profiles p
+    where p.id = auth.uid() and p.disabled_at is null
+  )
+);
+
+-- For now: owner/admin console uses service_role (bypasses RLS for moderation).
 
 
