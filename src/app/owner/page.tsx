@@ -148,7 +148,7 @@ export default function OwnerPage() {
 
         <div className={styles.card}>
           <div className={styles.row}>
-            <div style={{ fontWeight: 900, color: '#111827' }}>Users</div>
+            <div style={{ fontWeight: 700, color: '#111827' }}>Users</div>
             <input
               className={styles.input}
               value={userQuery}
@@ -209,7 +209,7 @@ export default function OwnerPage() {
 
         <div className={styles.card}>
           <div className={styles.row}>
-            <div style={{ fontWeight: 900, color: '#111827' }}>Groups</div>
+            <div style={{ fontWeight: 700, color: '#111827' }}>Groups</div>
             <input
               className={styles.input}
               value={groupQuery}

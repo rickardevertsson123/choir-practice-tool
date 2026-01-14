@@ -3,10 +3,10 @@ export default function HomePage() {
     <div style={{ padding: 16 }}>
       <h1>Choir Practice Tool</h1>
       <p>
-        Play locally (as before) or log in to access groups (coming next).
+        Play locally or log in to access groups.
       </p>
       <p>
-        <a href="/auth">Log in / Sign up</a> · <a href="/groups">My groups</a>
+        <a href="/play">Play (local file)</a> · <a href="/auth">Log in</a> · <a href="/groups">My groups</a>
       </p>
     </div>
   )

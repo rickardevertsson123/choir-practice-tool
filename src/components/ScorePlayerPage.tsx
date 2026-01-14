@@ -5,6 +5,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
+import { useSearchParams } from 'next/navigation'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import JSZip from 'jszip'
 
@@ -49,6 +50,7 @@ function clamp(v: number, min: number, max: number) {
 }
 
 export default function ScorePlayerPage() {
+  const search = useSearchParams()
   // Evaluation mode:
   // - false (default): evaluate pitch vs nearest semitone (raw intonation), no score target note.
   // - true: evaluate vs score target note (requires target selection code below).
@@ -332,6 +334,85 @@ export default function ScorePlayerPage() {
   /* =========================
      FILE LOAD
   ========================= */
+  const lastLoadedUrlRef = useRef<string | null>(null)
+
+  async function loadXmlContent(xmlContent: string) {
+    if (!osmdRef.current) throw new Error('OSMD saknas')
+    await osmdRef.current.load(xmlContent)
+    await osmdRef.current.render()
+
+    osmdRef.current.cursor.show()
+    osmdRef.current.cursor.reset()
+
+    const steps: Array<{ step: number; musicalTime: number }> = []
+    let i = 0
+    while (!osmdRef.current.cursor.Iterator.EndReached) {
+      const ts = osmdRef.current.cursor.Iterator.CurrentSourceTimestamp
+      steps.push({ step: i, musicalTime: ts ? ts.RealValue : 0 })
+      osmdRef.current.cursor.next()
+      i++
+    }
+    cursorStepsRef.current = steps
+
+    osmdRef.current.cursor.reset()
+    osmdRef.current.cursor.update()
+
+    const metadata = extractPartMetadata(xmlContent)
+    setPartMetadata(metadata)
+
+    const timeline = await buildScoreTimelineFromMusicXml(xmlContent)
+    timelineRef.current = timeline
+    setScoreTimeline(timeline)
+    setCurrentTime(0)
+
+    // Precompute notes grouped by voice to avoid rebuilding per-detection tick
+    const map: Record<string, Array<{ midi: number; start: number; end: number; duration: number }>> = {}
+    for (const n of timeline.notes) {
+      if (!map[n.voice]) map[n.voice] = []
+      map[n.voice].push({ midi: n.midiPitch, start: n.startTimeSeconds, end: n.startTimeSeconds + n.durationSeconds, duration: n.durationSeconds })
+    }
+    for (const k of Object.keys(map)) {
+      map[k].sort((a, b) => a.start - b.start)
+    }
+    notesByVoiceRef.current = map
+    // initialize per-voice indices
+    const idxMap: Record<string, number> = {}
+    for (const k of Object.keys(map)) idxMap[k] = 0
+    notesIndexByVoiceRef.current = idxMap
+
+    clearTrail()
+
+    // Reset pitch-detector internals and page-level pitch evaluation state so
+    // that loading a new file doesn't leave remnants from the previous song
+    // (spike gate, pending jumps, stable midi, transition grace, etc.).
+    resetPitchDetectorState()
+    resetPitchEvaluationState()
+
+    // Build the position cache and wait for it to become ready before
+    // restarting detection. `buildPositionCache` waits one animation frame
+    // to ensure OSMD has painted its cursor elements.
+    await buildPositionCache()
+
+    const voices = Array.from(new Set(timeline.notes.map(n => n.voice))).filter(
+      v => !v.toLowerCase().includes('keyboard')
+    )
+    // Ensure selected voice is valid for the new timeline. If the previous
+    // selection doesn't exist in the newly loaded score, pick the first.
+    if (voices.length) {
+      if (!selectedVoice || !voices.includes(selectedVoice)) setSelectedVoice(voices[0])
+    } else {
+      setSelectedVoice(null)
+    }
+
+    // If mic is active, restart detection loop after we've rebuilt timeline
+    // and indices. Give a short delay to allow player and caches to initialize.
+    if (micActive) {
+      // restart detection only after positions are ready
+      resetPitchDetectorState()
+      resetPitchEvaluationState()
+    }
+  }
+
   async function handleFileSelect(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
     if (!file) return
@@ -341,81 +422,7 @@ export default function ScorePlayerPage() {
 
     try {
       const xmlContent = await readFile(file)
-
-      if (!osmdRef.current) throw new Error('OSMD saknas')
-      await osmdRef.current.load(xmlContent)
-      await osmdRef.current.render()
-
-      osmdRef.current.cursor.show()
-      osmdRef.current.cursor.reset()
-
-      const steps: Array<{ step: number; musicalTime: number }> = []
-      let i = 0
-      while (!osmdRef.current.cursor.Iterator.EndReached) {
-        const ts = osmdRef.current.cursor.Iterator.CurrentSourceTimestamp
-        steps.push({ step: i, musicalTime: ts ? ts.RealValue : 0 })
-        osmdRef.current.cursor.next()
-        i++
-      }
-      cursorStepsRef.current = steps
-
-      osmdRef.current.cursor.reset()
-      osmdRef.current.cursor.update()
-
-      const metadata = extractPartMetadata(xmlContent)
-      setPartMetadata(metadata)
-
-      const timeline = await buildScoreTimelineFromMusicXml(xmlContent)
-      timelineRef.current = timeline
-      setScoreTimeline(timeline)
-      setCurrentTime(0)
-
-      // Precompute notes grouped by voice to avoid rebuilding per-detection tick
-      const map: Record<string, Array<{ midi: number; start: number; end: number; duration: number }>> = {}
-      for (const n of timeline.notes) {
-        if (!map[n.voice]) map[n.voice] = []
-        map[n.voice].push({ midi: n.midiPitch, start: n.startTimeSeconds, end: n.startTimeSeconds + n.durationSeconds, duration: n.durationSeconds })
-      }
-      for (const k of Object.keys(map)) {
-        map[k].sort((a, b) => a.start - b.start)
-      }
-      notesByVoiceRef.current = map
-      // initialize per-voice indices
-      const idxMap: Record<string, number> = {}
-      for (const k of Object.keys(map)) idxMap[k] = 0
-      notesIndexByVoiceRef.current = idxMap
-
-      clearTrail()
-
-      // Reset pitch-detector internals and page-level pitch evaluation state so
-      // that loading a new file doesn't leave remnants from the previous song
-      // (spike gate, pending jumps, stable midi, transition grace, etc.).
-      resetPitchDetectorState()
-      resetPitchEvaluationState()
-
-      // Build the position cache and wait for it to become ready before
-      // restarting detection. `buildPositionCache` waits one animation frame
-      // to ensure OSMD has painted its cursor elements.
-      await buildPositionCache()
-
-      const voices = Array.from(new Set(timeline.notes.map(n => n.voice))).filter(
-        v => !v.toLowerCase().includes('keyboard')
-      )
-      // Ensure selected voice is valid for the new timeline. If the previous
-      // selection doesn't exist in the newly loaded score, pick the first.
-      if (voices.length) {
-        if (!selectedVoice || !voices.includes(selectedVoice)) setSelectedVoice(voices[0])
-      } else {
-        setSelectedVoice(null)
-      }
-
-      // If mic is active, restart detection loop after we've rebuilt timeline
-      // and indices. Give a short delay to allow player and caches to initialize.
-      if (micActive) {
-        // restart detection only after positions are ready
-        resetPitchDetectorState()
-        resetPitchEvaluationState()
-      }
+      await loadXmlContent(xmlContent)
     } catch (err: any) {
       console.error(err)
       setError(`Kunde inte ladda filen: ${err?.message ?? 'Okänt fel'}`)
@@ -423,6 +430,59 @@ export default function ScorePlayerPage() {
       setIsLoading(false)
     }
   }
+
+  async function readUrlAsXml(url: string): Promise<string> {
+    const r = await fetch(url)
+    if (!r.ok) throw new Error(`Failed to fetch score (HTTP ${r.status})`)
+    const blob = await r.blob()
+
+    // Try to infer filename from URL.
+    const u = new URL(url)
+    const last = u.pathname.split('/').pop() || 'score'
+    const name = decodeURIComponent(last.split('?')[0])
+
+    if (!name.toLowerCase().endsWith('.mxl')) {
+      return await blob.text()
+    }
+
+    const zip = await JSZip.loadAsync(await blob.arrayBuffer())
+    const container = zip.file('META-INF/container.xml')
+    if (container) {
+      const containerXml = await container.async('text')
+      const doc = new DOMParser().parseFromString(containerXml, 'application/xml')
+      const rootfile = doc.querySelector('rootfile')
+      const fullPath = rootfile?.getAttribute('full-path')
+      if (fullPath) {
+        const main = zip.file(fullPath)
+        if (main) return main.async('text')
+      }
+    }
+    const xmlFile =
+      zip.file('score.xml') ||
+      Object.values(zip.files).find(
+        f => !f.dir && (f.name.endsWith('.xml') || f.name.endsWith('.musicxml')) && !f.name.includes('META-INF')
+      )
+    if (!xmlFile) throw new Error('Ingen XML-fil hittades i MXL-arkivet')
+    return xmlFile.async('text')
+  }
+
+  useEffect(() => {
+    const scoreUrl = search?.get('scoreUrl')
+    if (!scoreUrl) return
+    if (lastLoadedUrlRef.current === scoreUrl) return
+
+    lastLoadedUrlRef.current = scoreUrl
+    setError('')
+    setIsLoading(true)
+    readUrlAsXml(scoreUrl)
+      .then((xml) => loadXmlContent(xml))
+      .catch((err: any) => {
+        console.error(err)
+        setError(`Kunde inte ladda scoreUrl: ${err?.message ?? 'Okänt fel'}`)
+      })
+      .finally(() => setIsLoading(false))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search])
 
   async function readFile(file: File): Promise<string> {
     if (!file.name.toLowerCase().endsWith('.mxl')) {

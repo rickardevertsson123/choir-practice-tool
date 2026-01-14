@@ -1,0 +1,147 @@
+.page {
+  min-height: 100vh;
+  padding: 32px 16px;
+}
+
+.container {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.title {
+  font-size: 24px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.muted {
+  color: #6b7280;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.btn {
+  height: 40px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  color: #111827;
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.btnPrimary {
+  background: #111827;
+  border-color: #111827;
+  color: #ffffff;
+}
+
+.card {
+  margin-top: 16px;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
+  padding: 18px;
+}
+
+.sectionTitle {
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 8px;
+}
+
+.bannerDisabled {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(239, 68, 68, 0.10);
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  color: #991b1b;
+  font-weight: 700;
+}
+
+.cover {
+  margin-top: 16px;
+  height: 220px;
+  border-radius: 16px;
+  border: 1px solid #e5e7eb;
+  overflow: hidden;
+  position: relative;
+  background: linear-gradient(135deg, #111827, #f97316);
+}
+
+.coverImage {
+  position: absolute;
+  inset: 0;
+  background-size: cover;
+  background-position: center;
+  filter: saturate(1.05);
+}
+
+.coverOverlay {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(180deg, rgba(0,0,0,0.25), rgba(0,0,0,0.55));
+}
+
+.coverTitle {
+  position: absolute;
+  left: 18px;
+  right: 18px;
+  bottom: 14px;
+  color: white;
+  font-weight: 700;
+  font-size: 22px;
+  text-shadow: 0 8px 30px rgba(0,0,0,0.45);
+}
+
+.textarea {
+  width: 100%;
+  min-height: 140px;
+  border-radius: 12px;
+  border: 1px solid #d1d5db;
+  padding: 12px;
+  font-size: 14px;
+  outline: none;
+  resize: vertical;
+}
+
+.textarea:focus {
+  border-color: #f97316;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.25);
+}
+
+.markdown {
+  color: #111827;
+  line-height: 1.55;
+}
+
+.markdown :global(p) {
+  margin: 10px 0;
+}
+
+.markdown :global(a) {
+  color: #111827;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+

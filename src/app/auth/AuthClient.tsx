@@ -17,6 +17,8 @@ export default function AuthClient() {
   const [error, setError] = useState<string | null>(null)
 
   const supabase = useMemo(() => getSupabaseBrowser(), [])
+  const DISABLE_SIGNUP =
+    String(process.env.NEXT_PUBLIC_DISABLE_SIGNUP ?? 'false').toLowerCase() === 'true'
 
   useEffect(() => {
     // If already logged in, go to groups.
@@ -32,7 +34,8 @@ export default function AuthClient() {
 
   useEffect(() => {
     const m = search?.get('mode')
-    if (m === 'signup' || m === 'login') setMode(m)
+    if (m === 'login') setMode('login')
+    if (m === 'signup') setMode(DISABLE_SIGNUP ? 'login' : 'signup')
   }, [search])
 
   async function onSubmit(e: React.FormEvent) {
@@ -42,6 +45,11 @@ export default function AuthClient() {
 
     try {
       if (mode === 'signup') {
+        if (DISABLE_SIGNUP) {
+          setError('Sign up is disabled (closed beta).')
+          setMode('login')
+          return
+        }
         const { error: signUpErr } = await supabase.auth.signUp({
           email,
           password,
@@ -101,15 +109,23 @@ export default function AuthClient() {
           >
             Log in
           </button>
-          <button
-            type="button"
-            onClick={() => setMode('signup')}
-            className={`${styles.tab} ${mode === 'signup' ? styles.tabActive : ''}`}
-            aria-selected={mode === 'signup'}
-          >
-            Sign up
-          </button>
+          {!DISABLE_SIGNUP && (
+            <button
+              type="button"
+              onClick={() => setMode('signup')}
+              className={`${styles.tab} ${mode === 'signup' ? styles.tabActive : ''}`}
+              aria-selected={mode === 'signup'}
+            >
+              Sign up
+            </button>
+          )}
         </div>
+
+        {DISABLE_SIGNUP && (
+          <div className={`${styles.alert} ${styles.alertError}`} style={{ marginTop: 12 }}>
+            Sign up is disabled (closed beta).
+          </div>
+        )}
 
         <form onSubmit={onSubmit} className={styles.form}>
           <label className={styles.fieldLabel}>
