@@ -1,3 +1,14 @@
+# Environment variables (Next.js)
+
+Create a file called `.env.local` in the project root and set:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+
+Owner/admin (server-only):
+- `OWNER_EMAIL` (your email address)
+- `SUPABASE_SERVICE_ROLE_KEY` (Supabase Project Settings → API → service_role key)
+
 # Choir Practice Tool
 
 Ett webbaserat övningsverktyg för körsångare byggt med React, TypeScript och Vite.

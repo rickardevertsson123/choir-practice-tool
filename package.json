@@ -16,7 +16,8 @@
     "opensheetmusicdisplay": "^1.9.3",
     "pitchy": "*",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "@supabase/supabase-js": "^2.49.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.10",
