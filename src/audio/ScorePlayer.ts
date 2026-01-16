@@ -9,7 +9,10 @@ export interface VoiceMixerSettings {
 export interface ScorePlayerOptions {
   audioContext?: AudioContext;
   masterVolume?: number; // 0..1
+  timbre?: SynthTimbre;
 }
+
+export type SynthTimbre = 'sine' | 'vocal';
 
 export interface PlayerControls {
   play(): void;
@@ -60,43 +63,116 @@ type MonoNote = {
 };
 
 class VoiceSynth {
-  osc: OscillatorNode;
+  private oscillators: OscillatorNode[] = [];
+  private freqParams: AudioParam[] = [];
+  private lfo: OscillatorNode | null = null;
+  private lfoGain: GainNode | null = null;
   amp: GainNode;            // per-voice synth envelope (not mixer)
   started = false;
 
-  constructor(ctx: AudioContext, connectTo: AudioNode) {
-    this.osc = ctx.createOscillator();
-    this.osc.type = 'sine';
-
+  constructor(ctx: AudioContext, connectTo: AudioNode, timbre: SynthTimbre) {
     this.amp = ctx.createGain();
     this.amp.gain.value = 0; // start silent
 
-    this.osc.connect(this.amp);
-    this.amp.connect(connectTo);
+    if (timbre === 'vocal') {
+      // --- "Choir/Vocal" synthetic timbre ---
+      // Two detuned saws -> formant bandpass filter bank -> envelope.
+      const osc1 = ctx.createOscillator();
+      const osc2 = ctx.createOscillator();
+      osc1.type = 'sawtooth';
+      osc2.type = 'sawtooth';
+      osc2.detune.value = 7; // subtle chorusing
+
+      const srcMix = ctx.createGain();
+      srcMix.gain.value = 0.80; // louder vocal source; masterGain still limits overall output
+      osc1.connect(srcMix);
+      osc2.connect(srcMix);
+
+      // Formants (rough "ah" vowel). These are intentionally broad for a choir pad feel.
+      const formantSum = ctx.createGain();
+      formantSum.gain.value = 1.0;
+
+      const formants: Array<{ f: number; q: number; g: number }> = [
+        { f: 800, q: 8, g: 1.0 },
+        { f: 1150, q: 10, g: 0.7 },
+        { f: 2900, q: 12, g: 0.35 }
+      ];
+
+      for (const fm of formants) {
+        const bp = ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.value = fm.f;
+        bp.Q.value = fm.q;
+        const g = ctx.createGain();
+        g.gain.value = fm.g;
+        srcMix.connect(bp);
+        bp.connect(g);
+        g.connect(formantSum);
+      }
+
+      // Gentle lowpass to tame brightness.
+      const lp = ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 5200;
+      lp.Q.value = 0.7;
+      formantSum.connect(lp);
+
+      lp.connect(this.amp);
+      this.amp.connect(connectTo);
+
+      // Light vibrato (sung feel) on detune.
+      this.lfo = ctx.createOscillator();
+      this.lfo.type = 'sine';
+      this.lfo.frequency.value = 5.2;
+      this.lfoGain = ctx.createGain();
+      this.lfoGain.gain.value = 10; // cents
+      this.lfo.connect(this.lfoGain);
+      this.lfoGain.connect(osc1.detune);
+      this.lfoGain.connect(osc2.detune);
+
+      this.oscillators = [osc1, osc2];
+      this.freqParams = [osc1.frequency, osc2.frequency];
+    } else {
+      // --- Original simple timbre ---
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.connect(this.amp);
+      this.amp.connect(connectTo);
+      this.oscillators = [osc];
+      this.freqParams = [osc.frequency];
+    }
   }
 
   start(atTime: number) {
     if (this.started) return;
     // Set a safe initial freq so the node is valid before ramps
-    this.osc.frequency.setValueAtTime(220, atTime);
-    this.osc.start(atTime);
+    for (const f of this.freqParams) f.setValueAtTime(220, atTime);
+    for (const o of this.oscillators) o.start(atTime);
+    if (this.lfo) this.lfo.start(atTime);
     this.started = true;
   }
 
   stop(atTime: number) {
     if (!this.started) return;
-    try { this.osc.stop(atTime); } catch {}
+    for (const o of this.oscillators) {
+      try { o.stop(atTime); } catch {}
+    }
+    if (this.lfo) {
+      try { this.lfo.stop(atTime); } catch {}
+    }
     this.started = false;
   }
 
   scheduleNote(start: number, end: number, freq: number) {
     const a = this.amp.gain;
-    const f = this.osc.frequency;
+    const freqs = this.freqParams;
 
     // Frequency glide into the note (prevents discontinuity clicks)
-    f.cancelScheduledValues(start);
-    // If we don’t know current scheduled value, setTargetAtTime is forgiving
-    f.setTargetAtTime(freq, start, PORTAMENTO_SEC / 3);
+    for (const f of freqs) {
+      f.cancelScheduledValues(start);
+      // If we don’t know current scheduled value, setTargetAtTime is forgiving
+      f.setTargetAtTime(freq, start, PORTAMENTO_SEC / 3);
+    }
 
     // Envelope: ramp up at start
     a.cancelScheduledValues(start);
@@ -117,7 +193,11 @@ class VoiceSynth {
   }
 
   dispose() {
-    try { this.osc.disconnect(); } catch {}
+    for (const o of this.oscillators) {
+      try { o.disconnect(); } catch {}
+    }
+    try { this.lfoGain?.disconnect(); } catch {}
+    try { this.lfo?.disconnect(); } catch {}
     try { this.amp.disconnect(); } catch {}
   }
 }
@@ -125,6 +205,7 @@ class VoiceSynth {
 export class ScorePlayer implements PlayerControls {
   private audioContext: AudioContext;
   public timeline: ScoreTimeline;
+  private timbre: SynthTimbre;
 
   private masterGain: GainNode;
   private voiceGains = new Map<VoiceId, GainNode>();         // mixer per voice
@@ -139,6 +220,7 @@ export class ScorePlayer implements PlayerControls {
 
   constructor(timeline: ScoreTimeline, options?: ScorePlayerOptions) {
     this.timeline = timeline;
+    this.timbre = options?.timbre ?? 'sine';
     // Use provided AudioContext when available to keep timing / inputs in sync
     // and avoid creating multiple audio contexts when the mic is in use.
     if (options?.audioContext) {
@@ -176,7 +258,7 @@ export class ScorePlayer implements PlayerControls {
       this.voiceSettings.set(voice, { volume: 1.0, muted: false, solo: false });
 
       // One continuous synth per voice
-      const synth = new VoiceSynth(this.audioContext, mixGain);
+      const synth = new VoiceSynth(this.audioContext, mixGain, this.timbre);
       this.voiceSynths.set(voice, synth);
     }
 
@@ -383,7 +465,7 @@ export class ScorePlayer implements PlayerControls {
     }
   }
 
-  dispose(): void {
+  dispose(opts?: { closeAudioContext?: boolean }): void {
     this.stop();
     const t = this.audioContext.currentTime;
     for (const synth of this.voiceSynths.values()) {
@@ -392,8 +474,9 @@ export class ScorePlayer implements PlayerControls {
     }
     this.voiceSynths.clear();
     
-    // Only close the audio context if we created it.
-    if (this._ownsAudioContext) {
+    // Only close the audio context if we created it and the caller allows it.
+    const closeCtx = opts?.closeAudioContext !== false;
+    if (this._ownsAudioContext && closeCtx) {
       try { this.audioContext.close(); } catch (e) {}
     }
   }

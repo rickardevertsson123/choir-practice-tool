@@ -17,7 +17,7 @@ import {
   PartMetadata
 } from '../utils/musicXmlParser'
 
-import { ScorePlayer, VoiceMixerSettings } from '../audio/ScorePlayer'
+import { ScorePlayer, SynthTimbre, VoiceMixerSettings } from '../audio/ScorePlayer'
 import { frequencyToNoteInfo, PitchResult, resetPitchDetectorState } from '../audio/pitchDetection'
 import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCalibration'
 import { PerfOverlay, PerfSnapshot } from './scorePlayerPage/PerfOverlay'
@@ -217,6 +217,7 @@ export default function ScorePlayerPage() {
   const [activePanel, setActivePanel] = useState<ActivePanel>('none')
   const [osmdZoom, setOsmdZoom] = useState(1)
   const lastAppliedZoomRef = useRef<number>(1)
+  const [timbre, setTimbre] = useState<SynthTimbre>('vocal')
 
   // Avoid unnecessary rerenders from the detect loop by only committing
   // user-visible changes (rounded values) to React state.
@@ -628,7 +629,7 @@ export default function ScorePlayerPage() {
       // Pass existing audio context when available so the player shares the
       // same context as the mic (avoids multiple contexts and timing mismatch).
       // @ts-ignore
-      playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata, audioContext: audioContextRef.current })
+      playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata, audioContext: audioContextRef.current, timbre })
       timelineRef.current = scoreTimeline
 
       const initialSettings: Record<VoiceId, VoiceMixerSettings> = {}
@@ -744,6 +745,35 @@ export default function ScorePlayerPage() {
     p.setTempoMultiplier(mult)
   }
 
+  function recreatePlayerWithTimbre(next: SynthTimbre) {
+    const existing = playerRef.current
+    if (!existing || !scoreTimeline) return
+    const ctx = audioContextRef.current ?? existing.getAudioContext()
+    const wasPlaying = existing.isPlaying()
+    const t = existing.getCurrentTime()
+    const tempo = existing.getTempoMultiplier()
+    try {
+      // Critical: don't close the AudioContext when we are recreating the player
+      // on the same context (otherwise playback stops working after switching timbre).
+      existing.dispose({ closeAudioContext: false })
+    } catch {}
+
+    // Recreate on the same AudioContext so mic/worklet stays time-aligned.
+    // @ts-ignore
+    playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata, audioContext: ctx, timbre: next })
+    timelineRef.current = scoreTimeline
+    playerRef.current.setTempoMultiplier(tempo)
+
+    // Re-apply mixer settings from UI state
+    for (const v of getVoices()) {
+      const s = getVoiceSettings(v)
+      playerRef.current.setVoiceSettings(v, s)
+    }
+
+    playerRef.current.seekTo(t)
+    if (wasPlaying) playerRef.current.play()
+  }
+
   function getVoices(): VoiceId[] {
     if (!scoreTimeline) return []
     return Array.from(new Set(scoreTimeline.notes.map(n => n.voice)))
@@ -822,7 +852,7 @@ export default function ScorePlayerPage() {
             existingPlayer.dispose()
             // Recreate on the shared context
             // @ts-ignore
-            playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata, audioContext: ctx })
+            playerRef.current = new ScorePlayer(scoreTimeline, { partMetadata, audioContext: ctx, timbre })
             timelineRef.current = scoreTimeline
 
             // Refresh mixer state from new player instance
@@ -1785,6 +1815,21 @@ export default function ScorePlayerPage() {
                     ✕
                   </button>
                 </div>
+
+                <label className="score-overlay-field">
+                  Sound&nbsp;
+                  <select
+                    value={timbre}
+                    onChange={(e) => {
+                      const next = e.target.value as SynthTimbre
+                      setTimbre(next)
+                      recreatePlayerWithTimbre(next)
+                    }}
+                  >
+                    <option value="vocal">Vocal / Choir</option>
+                    <option value="sine">Pure tone</option>
+                  </select>
+                </label>
 
                 <label className="score-overlay-field">
                   Difficulty&nbsp;
