@@ -976,6 +976,7 @@ export default function ScorePlayerPage() {
 
           // --- PITCH RESULT + CENTS/JUDGEMENT (reuse existing page logic) ---
           const result = { frequency: data.frequency ?? null, clarity: data.clarity ?? 0 } as PitchResult
+          let freezePitchDisplay = false
 
           
           // Throttle UI state updates so we don't rerender on every worklet tick.
@@ -1114,6 +1115,7 @@ export default function ScorePlayerPage() {
                 }
               }
             }
+            freezePitchDisplay = inAsyncTransition
 
             const cents = !inAsyncTransition && exactMidi != null
               ? (USE_TARGET_NOTE && uiTarget
@@ -1121,11 +1123,14 @@ export default function ScorePlayerPage() {
                   : (exactMidi - Math.round(exactMidi)) * 100)
               : null
 
-            const lastRounded = lastEmittedDistanceRoundedRef.current
-            const nextRounded = cents == null ? null : Math.round(cents)
-            if (nextRounded !== lastRounded) {
-              lastEmittedDistanceRoundedRef.current = nextRounded
-              setDistanceCents(cents)
+            // Keep previous cents during transitions so the overlay doesn't jump to "---".
+            if (!freezePitchDisplay) {
+              const lastRounded = lastEmittedDistanceRoundedRef.current
+              const nextRounded = cents == null ? null : Math.round(cents)
+              if (nextRounded !== lastRounded) {
+                lastEmittedDistanceRoundedRef.current = nextRounded
+                setDistanceCents(cents)
+              }
             }
 
             if (player?.isPlaying() && cents != null) {
@@ -1278,8 +1283,9 @@ export default function ScorePlayerPage() {
             }
           }
 
-          // Unthrottled UI update (you chose to keep it that way for now)
-          setPitchResult(result)
+          // Pitch display update:
+          // Freeze during transitions (window includes two notes) to avoid misleading pitch/note.
+          if (!freezePitchDisplay) setPitchResult(result)
 
           // --- PERF: update counters from worklet messages (disabled by default) ---
           if (ENABLE_PERF_STATS) {

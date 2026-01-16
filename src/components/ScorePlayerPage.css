@@ -264,7 +264,7 @@
   top: 0;
   bottom: 0;
   width: 3px;
-  background: rgba(0, 0, 0, 0.7);
+  background: rgba(249, 115, 22, 0.88); /* warm amber/orange */
   pointer-events: none;
   z-index: 10;
 }
@@ -350,10 +350,10 @@
 .playhead-marker {
   position: absolute;
   width: 2px;
-  background: rgba(255, 0, 0, 0.8);
+  background: rgba(249, 115, 22, 0.95); /* warm amber/orange */
   pointer-events: none;
   z-index: 10;
-  box-shadow: 0 0 4px rgba(255, 0, 0, 0.5);
+  box-shadow: 0 0 7px rgba(249, 115, 22, 0.55);
 }
 
 .control-panel {

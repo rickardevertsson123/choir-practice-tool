@@ -79,7 +79,6 @@ export function PitchDetectorOverlay(props: PitchDetectorOverlayProps) {
             </div>
           </span>
           <span className="pitch-clarity">Clarity: {Math.round((pitchResult.clarity ?? 0) * 100)}%</span>
-          {pitchResult.debugReason && <span className="pitch-debug">Debug: {pitchResult.debugReason}</span>}
         </div>
       </div>
     </div>
