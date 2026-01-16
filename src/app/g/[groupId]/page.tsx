@@ -428,13 +428,16 @@ export default function GroupPage() {
             </div>
           </div>
           <div className={styles.row}>
-            <a className={styles.btn} href="/groups">
-              Back to My groups
+            <a className={styles.btn} href="/groups" title="Back to My groups">
+              <span aria-hidden="true" style={{ marginRight: 6 }}>←</span>
+              Back
             </a>
-            <a className={`${styles.btn} ${styles.btnPrimary}`} href="/groups">
+            <a className={`${styles.btn} ${styles.btnPrimary}`} href="/groups" title="Home">
+              <span aria-hidden="true" style={{ marginRight: 6 }}>⌂</span>
               Home
             </a>
-            <a className={styles.btn} href="/profile">
+            <a className={styles.btn} href="/profile" title="Profile">
+              <span aria-hidden="true" style={{ marginRight: 6 }}>☺</span>
               Profile
             </a>
             <button

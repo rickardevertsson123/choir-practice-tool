@@ -259,17 +259,49 @@ export default function ProfilePage() {
 
   return (
     <div style={{ maxWidth: 820, margin: '40px auto', padding: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-        <div>
-          <div style={{ fontSize: 22, fontWeight: 700, color: '#111827' }}>Profile</div>
-          <div style={{ color: '#6b7280', marginTop: 6 }}>Signed in as: {email ?? '—'}</div>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          gap: 10,
+          flexWrap: 'wrap',
+          alignItems: 'center',
+        }}
+      >
+        <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div
+            style={{
+              width: 72,
+              height: 72,
+              borderRadius: 999,
+              border: '1px solid rgba(255,255,255,0.18)',
+              background: avatarUrl ? `url(${avatarUrl}) center/cover no-repeat` : '#111827',
+              color: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 700,
+              fontSize: 18,
+            }}
+            aria-label="Avatar"
+          >
+            {!avatarUrl && (displayName.trim()[0] || email?.[0] || '?').toUpperCase()}
+          </div>
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 700, color: '#f9fafb' }}>
+              {displayName.trim() || 'Profile'}
+            </div>
+            <div style={{ color: '#cbd5e1', marginTop: 4 }}>{email ?? '—'}</div>
+          </div>
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <a href="/groups">Home</a>
+          <a href="/groups" style={{ color: '#e5e7eb', textDecoration: 'none' }}>
+            Home
+          </a>
         </div>
       </div>
 
-      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 18 }}>
+      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: 18 }}>
         <div style={{ fontWeight: 700, color: '#111827' }}>Avatar</div>
         <div style={{ color: '#6b7280', marginTop: 6 }}>A small profile photo shown to group members.</div>
         <div style={{ marginTop: 12, display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -324,7 +356,7 @@ export default function ProfilePage() {
         </div>
       </div>
 
-      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 18 }}>
+      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: 18 }}>
         <div style={{ fontWeight: 700, color: '#111827' }}>Display name</div>
         <div style={{ color: '#6b7280', marginTop: 6 }}>This name will be shown to other members in your groups.</div>
         <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -353,7 +385,7 @@ export default function ProfilePage() {
         </div>
       </div>
 
-      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 18 }}>
+      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: 18 }}>
         <div style={{ fontWeight: 700, color: '#111827' }}>Change password</div>
         <div style={{ color: '#6b7280', marginTop: 6 }}>Choose a new password for your account.</div>
         <div style={{ marginTop: 12, display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -390,7 +422,7 @@ export default function ProfilePage() {
         </div>
       </div>
 
-      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 18 }}>
+      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: 18 }}>
         <div style={{ fontWeight: 700, color: '#111827' }}>Danger zone</div>
         <div style={{ color: '#6b7280', marginTop: 6 }}>
           Delete your account. This is permanent.

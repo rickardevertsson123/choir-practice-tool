@@ -22,6 +22,8 @@ export default function GroupsPage() {
   const router = useRouter()
   const supabase = useMemo(() => getSupabaseBrowser(), [])
   const [email, setEmail] = useState<string | null>(null)
+  const [displayName, setDisplayName] = useState<string | null>(null)
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null)
   const [status, setStatus] = useState<'loading' | 'needs_verification' | 'ok'>('loading')
   const [groups, setGroups] = useState<MembershipRow[]>([])
   const [coverUrls, setCoverUrls] = useState<Record<string, string>>({})
@@ -48,6 +50,14 @@ export default function GroupsPage() {
       // Ensure a profile row exists (used for admin/owner counts + later group logic).
       try {
         await supabase.from('profiles').upsert({ id: user.id, email: user.email ?? null })
+        const { data: p } = await supabase.from('profiles').select('display_name,avatar_path').eq('id', user.id).maybeSingle()
+        setDisplayName(p?.display_name ?? null)
+        if (p?.avatar_path) {
+          const { data: a } = await supabase.storage.from('user-avatars').createSignedUrl(p.avatar_path, 60 * 60)
+          setAvatarUrl(a?.signedUrl ?? null)
+        } else {
+          setAvatarUrl(null)
+        }
       } catch {
         // Ignore: schema might not be applied yet.
       }
@@ -179,11 +189,37 @@ export default function GroupsPage() {
             </div>
           </div>
           <div className={styles.row}>
-            <a className={styles.btn} href="/profile">
-              Profile
+            <a
+              className={styles.iconBtn}
+              href="/profile"
+              title="Profile"
+              aria-label="Profile"
+              style={{
+                background: avatarUrl ? `url(${avatarUrl}) center/cover no-repeat` : undefined,
+              }}
+            >
+              {!avatarUrl && (
+                <span style={{ fontWeight: 700 }}>
+                  {(displayName?.trim()?.[0] || email?.trim()?.[0] || '?').toUpperCase()}
+                </span>
+              )}
             </a>
-            <button className={styles.btn} onClick={logout}>
-              Log out
+            <button className={styles.iconBtn} onClick={logout} title="Log out" aria-label="Log out">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M10 7V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-7a2 2 0 0 1-2-2v-1"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M15 12H3m0 0 3-3m-3 3 3 3"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </button>
           </div>
         </div>

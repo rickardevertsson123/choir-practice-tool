@@ -18,7 +18,8 @@
 }
 
 .cover {
-  height: 220px;
+  aspect-ratio: 16 / 9;
+  max-height: 360px;
   border-radius: 16px;
   border: 1px solid #e5e7eb;
   overflow: hidden;

@@ -1,0 +1,145 @@
+.page {
+  min-height: 100vh;
+  padding: 44px 16px 56px;
+}
+
+.container {
+  max-width: 980px;
+  margin: 0 auto;
+}
+
+.hero {
+  padding: 28px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  background:
+    radial-gradient(900px 500px at 10% 10%, rgba(249, 115, 22, 0.18), transparent 55%),
+    radial-gradient(900px 500px at 90% 0%, rgba(59, 130, 246, 0.22), transparent 55%),
+    rgba(255, 255, 255, 0.04);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.brandRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.brandLeft {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.brand {
+  font-size: 28px;
+  font-weight: 700;
+  color: #f9fafb;
+  letter-spacing: -0.02em;
+}
+
+.tagline {
+  margin-top: 8px;
+  font-size: 18px;
+  color: #e5e7eb;
+}
+
+.lede {
+  margin-top: 12px;
+  color: #cbd5e1;
+  max-width: 760px;
+}
+
+.ctaRow {
+  margin-top: 18px;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.btn {
+  height: 42px;
+  padding: 0 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f9fafb;
+  font-weight: 700;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.btn:hover {
+  background: rgba(255, 255, 255, 0.10);
+}
+
+.btnPrimary {
+  background: #f97316;
+  border-color: rgba(249, 115, 22, 0.45);
+  color: #111827;
+}
+
+.btnPrimary:hover {
+  background: #fb923c;
+}
+
+.grid {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: repeat(12, 1fr);
+  gap: 12px;
+}
+
+.card {
+  grid-column: span 6;
+  background: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 18px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);
+}
+
+.cardTitle {
+  font-weight: 700;
+  color: #111827;
+}
+
+.cardBody {
+  margin-top: 8px;
+  color: #374151;
+  line-height: 1.55;
+}
+
+.footerRow {
+  margin-top: 18px;
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  color: #cbd5e1;
+}
+
+.footerLink {
+  color: #e5e7eb;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+@media (max-width: 840px) {
+  .card { grid-column: span 12; }
+}
+
+

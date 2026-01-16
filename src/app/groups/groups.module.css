@@ -19,12 +19,12 @@
   font-size: 22px;
   line-height: 1.2;
   font-weight: 700;
-  color: #111827;
+  color: #f9fafb;
 }
 
 .subtitle {
   margin-top: 8px;
-  color: #6b7280;
+  color: #cbd5e1;
   font-size: 14px;
 }
 
@@ -103,7 +103,25 @@
 }
 
 .muted {
-  color: #6b7280;
+  color: #cbd5e1;
+}
+
+.iconBtn {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f9fafb;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.iconBtn:hover {
+  background: rgba(255, 255, 255, 0.10);
 }
 
 .list {

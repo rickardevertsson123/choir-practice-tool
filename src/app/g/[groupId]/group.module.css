@@ -19,11 +19,11 @@
 .title {
   font-size: 24px;
   font-weight: 700;
-  color: #111827;
+  color: #f9fafb;
 }
 
 .muted {
-  color: #6b7280;
+  color: #cbd5e1;
 }
 
 .row {
@@ -80,7 +80,8 @@
 
 .cover {
   margin-top: 16px;
-  height: 220px;
+  aspect-ratio: 16 / 9;
+  max-height: 360px;
   border-radius: 16px;
   border: 1px solid #e5e7eb;
   overflow: hidden;
