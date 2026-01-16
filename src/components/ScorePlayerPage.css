@@ -25,6 +25,13 @@
     padding: 10px;
     gap: 10px;
   }
+  /* give maximum vertical room to the current system */
+  .score-player-page.has-score .osmd-wrapper {
+    padding: 8px 8px 56px;
+  }
+  .score-player-page.has-score .osmd-container {
+    padding: 10px 8px;
+  }
 }
 
 .top-bar {

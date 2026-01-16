@@ -60,6 +60,8 @@ export default function ScorePlayerPage() {
   const ENABLE_ASYNC_TRANSITION =
     String(process.env.NEXT_PUBLIC_ENABLE_ASYNC_TRANSITION ?? 'true').toLowerCase() !== 'false'
   const SHOW_PITCH_DEBUG = String(process.env.NEXT_PUBLIC_PITCH_DEBUG ?? 'false').toLowerCase() === 'true'
+  // Perf overlay + counters are disabled by default.
+  const ENABLE_PERF_STATS = String(process.env.NEXT_PUBLIC_PERF_STATS ?? 'false').toLowerCase() === 'true'
 
   // Allowed score notes window (for "note correctness" without hinting pitch detection).
   // We compare the *nearest semitone* (rounded MIDI) against all target notes within this window.
@@ -232,24 +234,72 @@ export default function ScorePlayerPage() {
     if (!scoreTimeline) setActivePanel('none')
   }, [scoreTimeline])
 
-  function computeDesiredZoom(availableWidthPx: number): number {
+  function computeDesiredZoom(availableWidthPx: number, availableHeightPx: number): number {
     // A4-ish score wrapper width (matches CSS max width). We treat this as "1.0x".
     const BASE_PAGE_WIDTH_PX = 820
+    // Rough page height for responsive fitting on short screens (mobile landscape).
+    const BASE_PAGE_HEIGHT_PX = 1120
     // Slightly zoomed-out by default so more measures fit per system.
     const DESKTOP_BASE_ZOOM = 0.88
     // Don't let it get too small.
     const MIN_ZOOM = 0.55
-    const MAX_ZOOM = 1.0
-    const fit = availableWidthPx > 0 ? Math.min(1, availableWidthPx / BASE_PAGE_WIDTH_PX) : 1
+    const MAX_ZOOM = 1.05
+    const fitW = availableWidthPx > 0 ? Math.min(1, availableWidthPx / BASE_PAGE_WIDTH_PX) : 1
+    // Only fit height on short screens (e.g. mobile landscape). On desktop this can
+    // make things feel "too zoomed out" even when width is fine.
+    const shouldFitHeight = availableHeightPx > 0 && availableHeightPx < 720
+    const fitH = shouldFitHeight ? Math.min(1, (availableHeightPx * 0.92) / BASE_PAGE_HEIGHT_PX) : 1
+    const fit = Math.min(fitW, fitH)
     return clamp(DESKTOP_BASE_ZOOM * fit, MIN_ZOOM, MAX_ZOOM)
+  }
+
+  function updatePlayheadAtCurrentTime() {
+    const playhead = playheadRef.current
+    const container = scoreContainerRef.current
+    const timeline = timelineRef.current
+    const player = playerRef.current
+    if (!playhead || !container || !timeline || !player) return
+    if (!positionsReadyRef.current || cursorStepsRef.current.length === 0 || cursorPositionsRef.current.length === 0) return
+
+    const t = player.getCurrentTime()
+    const tempoBpm = timeline.tempoBpm
+    let musicalTime = (t * tempoBpm) / 240
+    const steps = cursorStepsRef.current
+    const lastIdx = steps.length - 1
+    const maxMusicalTime = steps[lastIdx]?.musicalTime ?? 0
+    musicalTime = Math.max(0, Math.min(musicalTime, maxMusicalTime))
+
+    // Find nearest step index (linear scan is OK; this runs only on resize/zoom).
+    let i = 0
+    while (i < lastIdx && steps[i + 1].musicalTime <= musicalTime) i++
+    while (i > 0 && steps[i].musicalTime > musicalTime) i--
+
+    const cur = steps[i]
+    const next = steps[i + 1]
+    const posCur = cursorPositionsRef.current[i]
+    const posNext = cursorPositionsRef.current[i + 1]
+
+    if (cur && next && posCur && posNext && next.musicalTime > cur.musicalTime) {
+      const progress = (musicalTime - cur.musicalTime) / (next.musicalTime - cur.musicalTime)
+      const left = posCur.left + (posNext.left - posCur.left) * progress
+      playhead.style.left = `${left}px`
+      playhead.style.top = `${posCur.top}px`
+      playhead.style.height = `${posCur.height}px`
+    } else if (posCur) {
+      playhead.style.left = `${posCur.left}px`
+      playhead.style.top = `${posCur.top}px`
+      playhead.style.height = `${posCur.height}px`
+    }
   }
 
   async function applyOsmdZoomIfNeeded() {
     const osmd = osmdRef.current
     const wrapper = osmdWrapperRef.current
+    const container = scoreContainerRef.current
     if (!osmd || !wrapper) return
     const w = wrapper.clientWidth
-    const nextZoom = computeDesiredZoom(w)
+    const h = container?.clientHeight ?? 0
+    const nextZoom = computeDesiredZoom(w, h)
     const prev = lastAppliedZoomRef.current
     if (Math.abs(nextZoom - prev) < 0.01) return
 
@@ -265,6 +315,8 @@ export default function ScorePlayerPage() {
       setOsmdZoom(nextZoom)
       // Zoom affects cursor geometry, so rebuild position cache.
       await buildPositionCache()
+      // Keep playhead aligned even when paused.
+      updatePlayheadAtCurrentTime()
     } catch (e) {
       console.warn('[osmd] failed to apply zoom', e)
     }
@@ -1229,20 +1281,22 @@ export default function ScorePlayerPage() {
           // Unthrottled UI update (you chose to keep it that way for now)
           setPitchResult(result)
 
-          // --- PERF: update counters from worklet messages ---
-          const handlerEndMs = performance.now()
-          const loopMs = handlerEndMs - handlerStartMs
-          perfLastLoopMsRef.current = loopMs
-          perfTotalLoopMsRef.current += loopMs
-          perfIterationsRef.current += 1
-          if (loopMs < perfMinLoopMsRef.current) perfMinLoopMsRef.current = loopMs
-          if (loopMs > perfMaxLoopMsRef.current) perfMaxLoopMsRef.current = loopMs
+          // --- PERF: update counters from worklet messages (disabled by default) ---
+          if (ENABLE_PERF_STATS) {
+            const handlerEndMs = performance.now()
+            const loopMs = handlerEndMs - handlerStartMs
+            perfLastLoopMsRef.current = loopMs
+            perfTotalLoopMsRef.current += loopMs
+            perfIterationsRef.current += 1
+            if (loopMs < perfMinLoopMsRef.current) perfMinLoopMsRef.current = loopMs
+            if (loopMs > perfMaxLoopMsRef.current) perfMaxLoopMsRef.current = loopMs
 
-          const detectMs = typeof data.detectMs === 'number' ? data.detectMs : 0
-          perfLastDetectMsRef.current = detectMs
-          perfTotalDetectMsRef.current += detectMs
-          if (detectMs < perfMinDetectMsRef.current) perfMinDetectMsRef.current = detectMs
-          if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
+            const detectMs = typeof data.detectMs === 'number' ? data.detectMs : 0
+            perfLastDetectMsRef.current = detectMs
+            perfTotalDetectMsRef.current += detectMs
+            if (detectMs < perfMinDetectMsRef.current) perfMinDetectMsRef.current = detectMs
+            if (detectMs > perfMaxDetectMsRef.current) perfMaxDetectMsRef.current = detectMs
+          }
         }
       }
     } catch (err: any) {
@@ -1282,6 +1336,8 @@ export default function ScorePlayerPage() {
     if (!osmdRef.current || !scoreContainerRef.current || cursorStepsRef.current.length === 0) {
       cursorPositionsRef.current = []
       positionsReadyRef.current = true
+      // best-effort: keep playhead sane when cache is reset
+      updatePlayheadAtCurrentTime()
       return
     }
 
@@ -1318,6 +1374,7 @@ export default function ScorePlayerPage() {
     osmdRef.current.cursor.reset()
     osmdRef.current.cursor.update()
     positionsReadyRef.current = true
+    updatePlayheadAtCurrentTime()
   }
 
   /* =========================
@@ -1378,13 +1435,18 @@ export default function ScorePlayerPage() {
         const scrollTop = container.scrollTop
         const viewH = container.clientHeight
 
-        const bottomMargin = 200
-        const topMargin = 100
+        const bottomMargin = 140
+        const topMargin = 80
+        // OSMD cursor height often doesn't include lyrics/text below the staff.
+        // Add a safety padding so we scroll to reveal the full system incl. text.
+        const extraBelow = viewH < 520 ? 170 : 130
+        const neededBottom = pos.top + pos.height + extraBelow
 
-        if (pos.top > scrollTop + viewH - bottomMargin) {
-          scrollTargetTop = pos.top - viewH / 3
+        // Keep the current system fully visible (including text), and don't wait until it's too late.
+        if (neededBottom > scrollTop + viewH - bottomMargin) {
+          scrollTargetTop = neededBottom - (viewH - bottomMargin)
         } else if (pos.top < scrollTop + topMargin) {
-          scrollTargetTop = pos.top - 150
+          scrollTargetTop = pos.top - topMargin
         }
 
         if (scrollTargetTop != null) {
@@ -1441,7 +1503,7 @@ export default function ScorePlayerPage() {
   // Snapshot perf to UI periodically while mic is active
   useEffect(() => {
     let snapTimer: number | null = null
-    if (micActive) {
+    if (micActive && ENABLE_PERF_STATS) {
       snapTimer = window.setInterval(() => {
         const iter = perfIterationsRef.current
         const avgLoop = iter ? perfTotalLoopMsRef.current / iter : 0
@@ -1561,7 +1623,7 @@ export default function ScorePlayerPage() {
                 <canvas ref={trailCanvasRef} className="trail-canvas" />
                 <div ref={playheadRef} className="playhead-marker" />
 
-                <PerfOverlay perfSnapshot={perfSnapshot} micActive={micActive} />
+                {ENABLE_PERF_STATS && <PerfOverlay perfSnapshot={perfSnapshot} micActive={micActive} />}
 
                 <PitchDetectorOverlay
                   micActive={micActive}
@@ -1617,7 +1679,10 @@ export default function ScorePlayerPage() {
                   {voicesHuman.map((v, i) => {
                     const n = Math.max(1, voicesHuman.length)
                     const angle = (Math.PI * 2 * i) / n - Math.PI / 2
-                    const radius = n <= 2 ? 150 : 170
+                    const minVp =
+                      typeof window !== 'undefined' ? Math.min(window.innerWidth, window.innerHeight) : 700
+                    const baseRadius = clamp(Math.round(minVp * 0.28), 88, 170)
+                    const radius = n <= 2 ? Math.round(baseRadius * 0.9) : baseRadius
                     const dx = Math.round(Math.cos(angle) * radius)
                     const dy = Math.round(Math.sin(angle) * radius)
                     const label = buildVoiceDisplayLabel(v, getVoices(), partMetadata)
