@@ -9,6 +9,8 @@
 }
 
 .hero {
+  position: relative;
+  overflow: hidden;
   padding: 28px;
   border-radius: 18px;
   border: 1px solid rgba(255, 255, 255, 0.10);
@@ -17,6 +19,24 @@
     radial-gradient(900px 500px at 90% 0%, rgba(59, 130, 246, 0.22), transparent 55%),
     rgba(255, 255, 255, 0.04);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.hero::before {
+  content: "";
+  position: absolute;
+  inset: -40px -60px -40px -60px;
+  background-image: url('/logo.png');
+  background-repeat: no-repeat;
+  background-position: 85% 55%;
+  background-size: min(520px, 60vw);
+  opacity: 0.30;
+  filter: saturate(1.12) contrast(1.05);
+  pointer-events: none;
+}
+
+.heroInner {
+  position: relative;
+  z-index: 1;
 }
 
 .brandRow {
@@ -33,15 +53,6 @@
   gap: 12px;
 }
 
-.logo {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  overflow: hidden;
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.06);
-}
-
 .brand {
   font-size: 28px;
   font-weight: 700;
@@ -50,7 +61,6 @@
 }
 
 .tagline {
-  margin-top: 8px;
   font-size: 18px;
   color: #e5e7eb;
 }

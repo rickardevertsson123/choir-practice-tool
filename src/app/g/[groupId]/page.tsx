@@ -44,6 +44,7 @@ type GroupScoreRow = {
   filename: string
   display_name: string | null
   expires_at: string | null
+  sort_order: number | null
   storage_path: string
   created_at: string
   created_by: string
@@ -75,10 +76,12 @@ export default function GroupPage() {
   const [coverUrl, setCoverUrl] = useState<string | null>(null)
   const [coverBusy, setCoverBusy] = useState(false)
   const [coverError, setCoverError] = useState<string | null>(null)
+  const [showCoverEditor, setShowCoverEditor] = useState(false)
   const [descDraft, setDescDraft] = useState<string>('')
   const [descBusy, setDescBusy] = useState(false)
   const [descError, setDescError] = useState<string | null>(null)
   const [descPreview, setDescPreview] = useState(true)
+  const [showAboutEditor, setShowAboutEditor] = useState(false)
 
   const [scores, setScores] = useState<GroupScoreRow[]>([])
   const [scoresLoading, setScoresLoading] = useState(false)
@@ -87,8 +90,13 @@ export default function GroupPage() {
   const [uploadBusy, setUploadBusy] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [uploadAttest, setUploadAttest] = useState(false)
-  const [uploadExpiresAt, setUploadExpiresAt] = useState<string>('')
-  const [uploadDisplayName, setUploadDisplayName] = useState<string>('')
+  const [uploadFile, setUploadFile] = useState<File | null>(null)
+  const [uploadDraftExpiresAt, setUploadDraftExpiresAt] = useState<string>('')
+  const [uploadDraftDisplayName, setUploadDraftDisplayName] = useState<string>('')
+
+  const [scoreEditId, setScoreEditId] = useState<string | null>(null)
+  const [scoreEditDisplayName, setScoreEditDisplayName] = useState<string>('')
+  const [scoreEditExpiresAt, setScoreEditExpiresAt] = useState<string>('')
 
   useEffect(() => {
     let cancelled = false
@@ -191,9 +199,10 @@ export default function GroupPage() {
       try {
         const { data, error } = await supabase
           .from('group_scores')
-          .select('id,filename,display_name,expires_at,storage_path,created_at,created_by')
+          .select('id,filename,display_name,expires_at,sort_order,storage_path,created_at,created_by')
           .eq('group_id', groupId)
-          .order('created_at', { ascending: false })
+          .order('sort_order', { ascending: true, nullsFirst: false })
+          .order('created_at', { ascending: true })
         if (error) throw error
         if (cancelled) return
         const rows = (data ?? []) as any as GroupScoreRow[]
@@ -225,6 +234,60 @@ export default function GroupPage() {
 
   function sanitizeFilename(name: string) {
     return name.replace(/[^a-zA-Z0-9._-]+/g, '_')
+  }
+
+  async function normalizeScoreOrderIfNeeded() {
+    if (!canAdmin) return
+    if (!groupId) return
+    // Only normalize if we have nulls.
+    if (!scores.some((s) => s.sort_order == null)) return
+
+    const ordered = [...scores]
+    for (let i = 0; i < ordered.length; i++) {
+      ordered[i] = { ...ordered[i], sort_order: i }
+    }
+
+    // Persist (best-effort).
+    for (const s of ordered) {
+      await supabase.from('group_scores').update({ sort_order: s.sort_order }).eq('id', s.id).eq('group_id', groupId)
+    }
+    setScores(ordered)
+  }
+
+  async function moveScore(scoreId: string, dir: -1 | 1) {
+    if (!canAdmin) return
+    if (!groupId) return
+    await normalizeScoreOrderIfNeeded()
+
+    const cur = [...scores]
+    const idx = cur.findIndex((s) => s.id === scoreId)
+    if (idx < 0) return
+    const j = idx + dir
+    if (j < 0 || j >= cur.length) return
+
+    const a = cur[idx]
+    const b = cur[j]
+    const aOrder = a.sort_order ?? idx
+    const bOrder = b.sort_order ?? j
+
+    // Swap in DB first.
+    const { error: e1 } = await supabase.from('group_scores').update({ sort_order: bOrder }).eq('id', a.id).eq('group_id', groupId)
+    if (e1) throw e1
+    const { error: e2 } = await supabase.from('group_scores').update({ sort_order: aOrder }).eq('id', b.id).eq('group_id', groupId)
+    if (e2) throw e2
+
+    const next = cur.map((s) => {
+      if (s.id === a.id) return { ...s, sort_order: bOrder }
+      if (s.id === b.id) return { ...s, sort_order: aOrder }
+      return s
+    })
+    next.sort((x, y) => {
+      const xo = x.sort_order ?? Number.MAX_SAFE_INTEGER
+      const yo = y.sort_order ?? Number.MAX_SAFE_INTEGER
+      if (xo !== yo) return xo - yo
+      return new Date(x.created_at).getTime() - new Date(y.created_at).getTime()
+    })
+    setScores(next)
   }
 
   async function compressCoverToWebp(file: File): Promise<Blob> {
@@ -346,14 +409,7 @@ export default function GroupPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [groupId, membership?.status, sessionToken])
 
-  useEffect(() => {
-    if (!(membership?.status === 'active' && membership?.role === 'admin')) return
-    const id = window.setInterval(() => {
-      refreshMembers()
-    }, 30000)
-    return () => window.clearInterval(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [membership?.status, membership?.role, groupId, sessionToken])
+  // NOTE: no auto-refresh. It caused scroll jumps; admins can refresh manually.
 
   useEffect(() => {
     let cancelled = false
@@ -418,7 +474,79 @@ export default function GroupPage() {
           {coverUrl && <div className={styles.coverImage} style={{ backgroundImage: `url(${coverUrl})` }} />}
           <div className={styles.coverOverlay} />
           <div className={styles.coverTitle}>{g?.name ?? 'Group'}</div>
+          {canAdmin && (
+            <button
+              className={`${styles.iconBtn} ${styles.coverGear}`}
+              type="button"
+              title="Edit cover"
+              aria-label="Edit cover"
+              onClick={() => setShowCoverEditor((v) => !v)}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                />
+                <path
+                  d="M19.4 15a8.3 8.3 0 0 0 .1-6l2-1.6-2-3.4-2.4 1a8.5 8.5 0 0 0-5.2-3l-.4-2.6H9.5L9.1 2a8.5 8.5 0 0 0-5.2 3l-2.4-1-2 3.4L1.6 9a8.3 8.3 0 0 0 .1 6l-2 1.6 2 3.4 2.4-1a8.5 8.5 0 0 0 5.2 3l.4 2.6h3.9l.4-2.6a8.5 8.5 0 0 0 5.2-3l2.4 1 2-3.4-2-1.6Z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+          )}
         </div>
+
+        {canAdmin && showCoverEditor && (
+          <div className={styles.card}>
+            <div className={styles.sectionTitle}>Replace cover</div>
+            <div className={styles.mutedDark} style={{ marginBottom: 10 }}>
+              Upload a cover image. We will center-crop to 16:9 and compress it (WebP 1280×720).
+            </div>
+            <div className={styles.row}>
+              <input
+                type="file"
+                accept="image/*"
+                disabled={coverBusy}
+                onChange={async (e) => {
+                  setCoverError(null)
+                  const f = e.target.files?.[0]
+                  if (!f) return
+                  setCoverBusy(true)
+                  try {
+                    const blob = await compressCoverToWebp(f)
+                    const path = `${groupId}/cover.webp`
+
+                    const { error: upErr } = await supabase.storage
+                      .from('group-covers')
+                      .upload(path, blob, { upsert: true, contentType: 'image/webp' })
+                    if (upErr) throw upErr
+
+                    const { error: dbErr } = await supabase.from('groups').update({ cover_image_path: path }).eq('id', groupId)
+                    if (dbErr) throw dbErr
+
+                    const { data, error: signErr } = await supabase.storage.from('group-covers').createSignedUrl(path, 60 * 60)
+                    if (signErr) throw signErr
+                    setCoverUrl(data?.signedUrl ?? null)
+                    setShowCoverEditor(false)
+                  } catch (err: any) {
+                    setCoverError(err?.message ? String(err.message) : 'Failed to upload cover')
+                  } finally {
+                    setCoverBusy(false)
+                    e.target.value = ''
+                  }
+                }}
+              />
+              {coverBusy && <span className={styles.mutedDark}>Uploading…</span>}
+              <button className={styles.btn} type="button" onClick={() => setShowCoverEditor(false)} disabled={coverBusy}>
+                Cancel
+              </button>
+            </div>
+            {coverError && <div style={{ marginTop: 10, color: '#991b1b', fontWeight: 800 }}>{coverError}</div>}
+          </div>
+        )}
 
         <div className={styles.header}>
           <div>
@@ -428,41 +556,50 @@ export default function GroupPage() {
             </div>
           </div>
           <div className={styles.row}>
-            <a className={styles.btn} href="/groups" title="Back to My groups">
-              <span aria-hidden="true" style={{ marginRight: 6 }}>←</span>
-              Back
+            <a className={styles.iconBtn} href="/groups" title="Back to My groups" aria-label="Back to My groups">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M9 14 4 9l5-5"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M20 20v-5a6 6 0 0 0-6-6H4"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
             </a>
-            <a className={`${styles.btn} ${styles.btnPrimary}`} href="/groups" title="Home">
-              <span aria-hidden="true" style={{ marginRight: 6 }}>⌂</span>
-              Home
+            <a className={styles.iconBtn} href="/groups" title="Home" aria-label="Home">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M3 10.5 12 3l9 7.5V20a1.8 1.8 0 0 1-1.8 1.8H4.8A1.8 1.8 0 0 1 3 20v-9.5Z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinejoin="round"
+                />
+                <path d="M9.5 21.8V14h5v7.8" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+              </svg>
             </a>
-            <a className={styles.btn} href="/profile" title="Profile">
-              <span aria-hidden="true" style={{ marginRight: 6 }}>☺</span>
-              Profile
+            <a className={styles.iconBtn} href="/profile" title="Profile" aria-label="Profile">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path
+                  d="M20 21a8 8 0 1 0-16 0"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                />
+                <path
+                  d="M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8Z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                />
+              </svg>
             </a>
-            <button
-              className={styles.btn}
-              onClick={async () => {
-                if (!sessionToken) return
-                const ok = confirm('Leave this group? You can request access again via an invite link.')
-                if (!ok) return
-                try {
-                  const r = await fetch(`/api/groups/${groupId}/leave`, {
-                    method: 'POST',
-                    headers: { Authorization: `Bearer ${sessionToken}` },
-                  })
-                  const j = await r.json().catch(() => ({}))
-                  if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
-                  router.replace('/groups')
-                } catch (e: any) {
-                  alert(e?.message ? String(e.message) : 'Failed to leave group')
-                }
-              }}
-              disabled={!sessionToken}
-              title="Leave group"
-            >
-              Leave group
-            </button>
           </div>
         </div>
 
@@ -489,139 +626,128 @@ export default function GroupPage() {
               </div>
             )}
 
-            {canAdmin && (
-              <div className={styles.card}>
-                <div className={styles.sectionTitle}>Cover image (admin)</div>
-                <div className={styles.muted} style={{ marginBottom: 10 }}>
-                  Upload a cover image. We will center-crop to 16:9 and compress it (WebP 1280×720).
+            <div className={styles.card}>
+              <div className={styles.cardHeaderRow}>
+                <div className={styles.sectionTitle} style={{ marginBottom: 0 }}>
+                  About
                 </div>
-                <div className={styles.row}>
-                  <input
-                    type="file"
-                    accept="image/*"
-                    disabled={coverBusy}
-                    onChange={async (e) => {
-                      setCoverError(null)
-                      const f = e.target.files?.[0]
-                      if (!f) return
-                      setCoverBusy(true)
-                      try {
-                        const blob = await compressCoverToWebp(f)
-                        const path = `${groupId}/cover.webp`
-
-                        const { error: upErr } = await supabase.storage
-                          .from('group-covers')
-                          .upload(path, blob, { upsert: true, contentType: 'image/webp' })
-                        if (upErr) throw upErr
-
-                        const { error: dbErr } = await supabase
-                          .from('groups')
-                          .update({ cover_image_path: path })
-                          .eq('id', groupId)
-                        if (dbErr) throw dbErr
-
-                        const { data, error: signErr } = await supabase.storage
-                          .from('group-covers')
-                          .createSignedUrl(path, 60 * 60)
-                        if (signErr) throw signErr
-                        setCoverUrl(data?.signedUrl ?? null)
-                      } catch (err: any) {
-                        setCoverError(err?.message ? String(err.message) : 'Failed to upload cover')
-                      } finally {
-                        setCoverBusy(false)
-                        e.target.value = ''
-                      }
-                    }}
-                  />
-                  {coverBusy && <span className={styles.muted}>Uploading…</span>}
-                </div>
-                {coverError && <div style={{ marginTop: 10, color: '#991b1b', fontWeight: 800 }}>{coverError}</div>}
-              </div>
-            )}
-
-            {canAdmin && (
-              <div className={styles.card}>
-                <div className={styles.sectionTitle}>Settings (admin)</div>
-                <div className={styles.muted} style={{ marginBottom: 10 }}>
-                  Generate a time-limited join link. Generating a new link revokes the previous one.
-                </div>
-                <div className={styles.row}>
-                  <label className={styles.muted} style={{ fontSize: 13 }}>
-                    Expires at
-                    <input
-                      type="date"
-                      value={inviteExpiresAt}
-                      onChange={(e) => setInviteExpiresAt(e.target.value)}
-                      style={{ marginLeft: 10, height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px' }}
-                    />
-                  </label>
+                {canAdmin && (
                   <button
-                    className={`${styles.btn} ${styles.btnPrimary}`}
-                    disabled={inviteBusy || !inviteExpiresAt || !sessionToken}
-                    onClick={async () => {
-                      setInviteError(null)
-                      setInviteUrl(null)
-                      if (!inviteExpiresAt) return
-                      setInviteBusy(true)
-                      try {
-                        // Interpret date as end-of-day local time.
-                        const expires = new Date(`${inviteExpiresAt}T23:59:59`)
-                        const r = await fetch(`/api/groups/${groupId}/invite`, {
-                          method: 'POST',
-                          headers: {
-                            Authorization: `Bearer ${sessionToken}`,
-                            'content-type': 'application/json',
-                          },
-                          body: JSON.stringify({ expiresAt: expires.toISOString() }),
-                        })
-                        const j = await r.json().catch(() => ({}))
-                        if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
-                        setInviteUrl(j.joinUrl)
-                      } catch (e: any) {
-                        setInviteError(e?.message ? String(e.message) : 'Unknown error')
-                      } finally {
-                        setInviteBusy(false)
-                      }
-                    }}
+                    className={`${styles.iconBtn} ${styles.iconBtnDark}`}
+                    type="button"
+                    title="Edit description"
+                    aria-label="Edit description"
+                    onClick={() => setShowAboutEditor((v) => !v)}
                   >
-                    {inviteBusy ? 'Generating…' : 'Generate link'}
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path
+                        d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                      />
+                      <path
+                        d="M19.4 15a8.3 8.3 0 0 0 .1-6l2-1.6-2-3.4-2.4 1a8.5 8.5 0 0 0-5.2-3l-.4-2.6H9.5L9.1 2a8.5 8.5 0 0 0-5.2 3l-2.4-1-2 3.4L1.6 9a8.3 8.3 0 0 0 .1 6l-2 1.6 2 3.4 2.4-1a8.5 8.5 0 0 0 5.2 3l.4 2.6h3.9l.4-2.6a8.5 8.5 0 0 0 5.2-3l2.4 1 2-3.4-2-1.6Z"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinejoin="round"
+                      />
+                    </svg>
                   </button>
-                </div>
-                {inviteUrl && (
-                  <div style={{ marginTop: 10 }}>
-                    <div className={styles.muted} style={{ fontSize: 13, marginBottom: 6 }}>
-                      Join link
-                    </div>
-                    <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                      <code style={{ padding: '8px 10px', background: '#f9fafb', border: '1px solid #e5e7eb', borderRadius: 10 }}>
-                        {inviteUrl}
-                      </code>
-                      <button
-                        className={styles.btn}
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(inviteUrl)
-                            setInviteCopied(true)
-                            window.setTimeout(() => setInviteCopied(false), 1200)
-                          } catch {}
-                        }}
-                      >
-                        {inviteCopied ? 'Copied' : 'Copy'}
-                      </button>
-                    </div>
-                  </div>
                 )}
-                {inviteError && <div style={{ marginTop: 10, color: '#991b1b', fontWeight: 800 }}>{inviteError}</div>}
               </div>
-            )}
+
+              {(g?.description_md ?? '').trim().length === 0 ? (
+                <div className={styles.mutedDark} style={{ marginTop: 8 }}>
+                  No description yet.
+                </div>
+              ) : (
+                <div className={styles.markdown} style={{ marginTop: 8 }}>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{g?.description_md ?? ''}</ReactMarkdown>
+                </div>
+              )}
+
+              {canAdmin && showAboutEditor && (
+                <div style={{ marginTop: 14 }}>
+                  <div className={styles.row} style={{ justifyContent: 'space-between' }}>
+                    <div className={styles.mutedDark} style={{ fontSize: 13 }}>
+                      Markdown supported.
+                    </div>
+                    <button className={styles.btn} type="button" onClick={() => setDescPreview((v) => !v)}>
+                      {descPreview ? 'Hide preview' : 'Show preview'}
+                    </button>
+                  </div>
+
+                  <div style={{ marginTop: 10 }}>
+                    <textarea
+                      className={styles.textarea}
+                      value={descDraft}
+                      onChange={(e) => setDescDraft(e.target.value)}
+                      placeholder="Write a short description of the choir/group…"
+                    />
+                  </div>
+
+                  <div className={styles.row} style={{ marginTop: 10 }}>
+                    <button
+                      className={`${styles.btn} ${styles.btnPrimary}`}
+                      disabled={descBusy}
+                      onClick={async () => {
+                        setDescError(null)
+                        setDescBusy(true)
+                        try {
+                          const { error: e } = await supabase.from('groups').update({ description_md: descDraft }).eq('id', groupId)
+                          if (e) throw e
+                          setMembership((cur) =>
+                            cur && cur.group ? ({ ...cur, group: { ...cur.group, description_md: descDraft } } as any) : cur
+                          )
+                          setShowAboutEditor(false)
+                        } catch (err: any) {
+                          setDescError(err?.message ? String(err.message) : 'Failed to save')
+                        } finally {
+                          setDescBusy(false)
+                        }
+                      }}
+                    >
+                      {descBusy ? 'Saving…' : 'Save'}
+                    </button>
+                    <button
+                      className={styles.btn}
+                      type="button"
+                      onClick={() => {
+                        setDescDraft(membership?.group?.description_md ?? '')
+                        setDescError(null)
+                        setShowAboutEditor(false)
+                      }}
+                      disabled={descBusy}
+                    >
+                      Cancel
+                    </button>
+                    {descError && <span style={{ color: '#991b1b', fontWeight: 800 }}>{descError}</span>}
+                  </div>
+
+                  {descPreview && (
+                    <div style={{ marginTop: 12 }}>
+                      <div className={styles.mutedDark} style={{ fontSize: 13, marginBottom: 6 }}>
+                        Preview
+                      </div>
+                      <div
+                        className={styles.markdown}
+                        style={{ padding: 12, border: '1px solid #e5e7eb', borderRadius: 12, background: '#fff' }}
+                      >
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{descDraft || '_No text_'}</ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {canAdmin && (
               <div className={styles.card}>
                 <div className={styles.sectionTitle}>Pending requests</div>
-                {pendingLoading && <div className={styles.muted}>Loading…</div>}
+                {pendingLoading && <div className={styles.mutedDark}>Loading…</div>}
                 {pendingError && <div style={{ color: '#991b1b', fontWeight: 800 }}>{pendingError}</div>}
                 {!pendingLoading && !pendingError && pending.length === 0 && (
-                  <div className={styles.muted}>No pending requests.</div>
+                  <div className={styles.mutedDark}>No pending requests.</div>
                 )}
                 {!pendingLoading && !pendingError && pending.length > 0 && (
                   <div style={{ display: 'grid', gap: 10 }}>
@@ -663,7 +789,7 @@ export default function GroupPage() {
                           <div style={{ fontWeight: 700, color: '#111827' }}>
                             {p.displayName || p.email || p.userId}
                           </div>
-                          <div className={styles.muted} style={{ fontSize: 13 }}>
+                          <div className={styles.mutedDark} style={{ fontSize: 13 }}>
                             Requested: {new Date(p.createdAt).toLocaleString()}
                           </div>
                           </div>
@@ -681,6 +807,7 @@ export default function GroupPage() {
                                 const j = await r.json().catch(() => ({}))
                                 if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
                                 setPending((cur) => cur.filter((x) => x.userId !== p.userId))
+                                await refreshMembers()
                               } catch (e: any) {
                                 setPendingError(e?.message ? String(e.message) : 'Failed to approve')
                               }
@@ -712,76 +839,88 @@ export default function GroupPage() {
                     ))}
                   </div>
                 )}
-              </div>
-            )}
 
-            <div className={styles.card}>
-              <div className={styles.sectionTitle}>About</div>
-              {(g?.description_md ?? '').trim().length === 0 ? (
-                <div className={styles.muted}>No description yet.</div>
-              ) : (
-                <div className={styles.markdown}>
-                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{g?.description_md ?? ''}</ReactMarkdown>
-                </div>
-              )}
-            </div>
-
-            {canAdmin && (
-              <div className={styles.card}>
-                <div className={styles.sectionTitle}>Edit description (admin)</div>
-                <div className={styles.row} style={{ justifyContent: 'space-between' }}>
-                  <div className={styles.muted} style={{ fontSize: 13 }}>
-                    Markdown supported.
+                <div style={{ marginTop: 14, borderTop: '1px solid #e5e7eb', paddingTop: 14 }}>
+                  <div style={{ fontWeight: 700, color: '#111827' }}>Invite link</div>
+                  <div className={styles.mutedDark} style={{ marginTop: 6, marginBottom: 10 }}>
+                    Generate a time-limited join link. Generating a new link revokes the previous one.
                   </div>
-                  <button className={styles.btn} onClick={() => setDescPreview((v) => !v)}>
-                    {descPreview ? 'Hide preview' : 'Show preview'}
-                  </button>
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  <textarea
-                    className={styles.textarea}
-                    value={descDraft}
-                    onChange={(e) => setDescDraft(e.target.value)}
-                    placeholder="Write a short description of the choir/group…"
-                  />
-                </div>
-                <div className={styles.row} style={{ marginTop: 10 }}>
-                  <button
-                    className={`${styles.btn} ${styles.btnPrimary}`}
-                    disabled={descBusy}
-                    onClick={async () => {
-                      setDescError(null)
-                      setDescBusy(true)
-                      try {
-                        const { error: e } = await supabase
-                          .from('groups')
-                          .update({ description_md: descDraft })
-                          .eq('id', groupId)
-                        if (e) throw e
-                        setMembership((cur) =>
-                          cur && cur.group ? ({ ...cur, group: { ...cur.group, description_md: descDraft } } as any) : cur
-                        )
-                      } catch (err: any) {
-                        setDescError(err?.message ? String(err.message) : 'Failed to save')
-                      } finally {
-                        setDescBusy(false)
-                      }
-                    }}
-                  >
-                    {descBusy ? 'Saving…' : 'Save'}
-                  </button>
-                  {descError && <span style={{ color: '#991b1b', fontWeight: 800 }}>{descError}</span>}
-                </div>
-                {descPreview && (
-                  <div style={{ marginTop: 12 }}>
-                    <div className={styles.muted} style={{ fontSize: 13, marginBottom: 6 }}>
-                      Preview
-                    </div>
-                    <div className={styles.markdown} style={{ padding: 12, border: '1px solid #e5e7eb', borderRadius: 12, background: '#fff' }}>
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{descDraft || '_No text_'}</ReactMarkdown>
-                    </div>
+                  <div className={styles.row}>
+                    <label className={styles.mutedDark} style={{ fontSize: 13 }}>
+                      Expires at
+                      <input
+                        type="date"
+                        value={inviteExpiresAt}
+                        onChange={(e) => setInviteExpiresAt(e.target.value)}
+                        style={{ marginLeft: 10, height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px' }}
+                      />
+                    </label>
+                    <button
+                      className={`${styles.btn} ${styles.btnPrimary}`}
+                      disabled={inviteBusy || !inviteExpiresAt || !sessionToken}
+                      onClick={async () => {
+                        setInviteError(null)
+                        setInviteUrl(null)
+                        if (!inviteExpiresAt) return
+                        setInviteBusy(true)
+                        try {
+                          // Interpret date as end-of-day local time.
+                          const expires = new Date(`${inviteExpiresAt}T23:59:59`)
+                          const r = await fetch(`/api/groups/${groupId}/invite`, {
+                            method: 'POST',
+                            headers: {
+                              Authorization: `Bearer ${sessionToken}`,
+                              'content-type': 'application/json',
+                            },
+                            body: JSON.stringify({ expiresAt: expires.toISOString() }),
+                          })
+                          const j = await r.json().catch(() => ({}))
+                          if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
+                          setInviteUrl(j.joinUrl)
+                        } catch (e: any) {
+                          setInviteError(e?.message ? String(e.message) : 'Unknown error')
+                        } finally {
+                          setInviteBusy(false)
+                        }
+                      }}
+                    >
+                      {inviteBusy ? 'Generating…' : 'Generate link'}
+                    </button>
                   </div>
-                )}
+                  {inviteUrl && (
+                    <div style={{ marginTop: 10 }}>
+                      <div className={styles.mutedDark} style={{ fontSize: 13, marginBottom: 6 }}>
+                        Join link
+                      </div>
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+                        <code
+                          style={{
+                            padding: '8px 10px',
+                            background: '#f3f4f6',
+                            border: '1px solid #e5e7eb',
+                            borderRadius: 10,
+                            color: '#374151',
+                          }}
+                        >
+                          {inviteUrl}
+                        </code>
+                        <button
+                          className={styles.btn}
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(inviteUrl)
+                              setInviteCopied(true)
+                              window.setTimeout(() => setInviteCopied(false), 1200)
+                            } catch {}
+                          }}
+                        >
+                          {inviteCopied ? 'Copied' : 'Copy'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  {inviteError && <div style={{ marginTop: 10, color: '#991b1b', fontWeight: 800 }}>{inviteError}</div>}
+                </div>
               </div>
             )}
 
@@ -795,10 +934,10 @@ export default function GroupPage() {
                     Refresh
                   </button>
                 </div>
-                {membersLoading && <div className={styles.muted}>Loading…</div>}
+                {membersLoading && <div className={styles.mutedDark}>Loading…</div>}
                 {membersError && <div style={{ color: '#991b1b', fontWeight: 800 }}>{membersError}</div>}
                 {!membersLoading && !membersError && members.length === 0 && (
-                  <div className={styles.muted}>No members found.</div>
+                  <div className={styles.mutedDark}>No members found.</div>
                 )}
                 {!membersLoading && !membersError && members.length > 0 && (
                   <div style={{ display: 'grid', gap: 10 }}>
@@ -876,6 +1015,7 @@ export default function GroupPage() {
                                         cur.map((x) => (x.userId === m.userId ? { ...x, status: 'active' } : x))
                                       )
                                       setPending((cur) => cur.filter((x) => x.userId !== m.userId))
+                                      await refreshMembers()
                                     } catch (e: any) {
                                       setMembersError(e?.message ? String(e.message) : 'Failed to approve')
                                     }
@@ -909,7 +1049,8 @@ export default function GroupPage() {
 
                             {canAdmin && (m.status === 'pending' || m.role === 'member') && (
                               <button
-                                className={styles.btn}
+                                className={`${styles.iconBtn} ${styles.iconBtnDark}`}
+                                style={{ width: 36, height: 36 }}
                                 disabled={!sessionToken}
                                 onClick={async () => {
                                   if (!confirm(`Remove ${label} from group?`)) return
@@ -927,8 +1068,15 @@ export default function GroupPage() {
                                     setMembersError(e?.message ? String(e.message) : 'Failed to remove')
                                   }
                                 }}
+                                title="Remove"
+                                aria-label="Remove"
                               >
-                                Remove
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                  <path d="M4 7h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <path d="M10 11v7M14 11v7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <path d="M9 7l1-2h4l1 2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                                  <path d="M6 7l1 14h10l1-14" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                                </svg>
                               </button>
                             )}
                           </div>
@@ -943,11 +1091,11 @@ export default function GroupPage() {
             <div className={styles.card}>
               <div className={styles.sectionTitle}>Repertoire</div>
 
-              {scoresLoading && <div className={styles.muted}>Loading…</div>}
+              {scoresLoading && <div className={styles.mutedDark}>Loading…</div>}
               {scoresError && <div style={{ color: '#991b1b', fontWeight: 700 }}>{scoresError}</div>}
 
               {!scoresLoading && !scoresError && scores.length === 0 && (
-                <div className={styles.muted}>No scores uploaded yet.</div>
+                <div className={styles.mutedDark}>No scores uploaded yet.</div>
               )}
 
               {!scoresLoading && !scoresError && scores.length > 0 && (
@@ -957,71 +1105,238 @@ export default function GroupPage() {
                     const title = (s.display_name || s.filename).trim()
                     const expiresAt = s.expires_at ? new Date(s.expires_at) : null
                     const expired = expiresAt ? Date.now() > expiresAt.getTime() : false
+                    const idx = scores.findIndex((x) => x.id === s.id)
                     return (
-                      <div
-                        key={s.id}
-                        style={{
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          alignItems: 'center',
-                          gap: 10,
-                          padding: 12,
-                          borderRadius: 12,
-                          border: '1px solid #e5e7eb',
-                          background: '#ffffff',
-                          flexWrap: 'wrap',
-                        }}
-                      >
-                        <div>
-                          <div style={{ fontWeight: 700, color: '#111827' }}>{title}</div>
-                          <div className={styles.muted} style={{ fontSize: 13 }}>
-                            Uploaded: {new Date(s.created_at).toLocaleString()}
-                          </div>
-                          {expiresAt && (
-                            <div className={styles.muted} style={{ fontSize: 13, marginTop: 4 }}>
-                              Expires: {expiresAt.toLocaleDateString()} {expired ? ' (expired)' : ''}
+                      <div key={s.id} style={{ display: 'grid', gap: 8 }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: 10,
+                            padding: 12,
+                            borderRadius: 12,
+                            border: '1px solid #e5e7eb',
+                            background: '#ffffff',
+                            flexWrap: 'wrap',
+                          }}
+                        >
+                          <div>
+                            <div style={{ fontWeight: 700, color: '#111827' }}>{title}</div>
+                            <div className={styles.mutedDark} style={{ fontSize: 13 }}>
+                              Uploaded: {new Date(s.created_at).toLocaleString()}
                             </div>
-                          )}
-                        </div>
-                        <div className={styles.row}>
-                          {url && !expired ? (
-                            <a className={`${styles.btn} ${styles.btnPrimary}`} href={`/play?scoreUrl=${encodeURIComponent(url)}`}>
-                              Play
-                            </a>
-                          ) : (
-                            <button className={styles.btn} disabled title={expired ? 'Expired' : 'No signed URL yet'}>
-                              Play
-                            </button>
-                          )}
-                          {canAdmin && (
-                            <button
-                              className={styles.btn}
-                              onClick={async () => {
-                                if (!confirm(`Delete "${title}"? This will remove it for all group members.`)) return
-                                setScoresError(null)
-                                try {
-                                  const { error: dbErr } = await supabase.from('group_scores').delete().eq('id', s.id).eq('group_id', groupId)
-                                  if (dbErr) throw dbErr
+                            {expiresAt && (
+                              <div className={styles.mutedDark} style={{ fontSize: 13, marginTop: 4 }}>
+                                Expires: {expiresAt.toLocaleDateString()} {expired ? ' (expired)' : ''}
+                              </div>
+                            )}
+                          </div>
+                          <div className={styles.row}>
+                            {url && !expired ? (
+                              <a
+                                className={`${styles.iconBtn} ${styles.iconBtnDark}`}
+                                style={{ width: 36, height: 36 }}
+                                href={`/play?scoreUrl=${encodeURIComponent(url)}`}
+                                title="Play"
+                                aria-label="Play"
+                              >
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                  <path d="M9 7v10l8-5-8-5Z" fill="currentColor" />
+                                </svg>
+                              </a>
+                            ) : (
+                              <button
+                                className={`${styles.iconBtn} ${styles.iconBtnDark}`}
+                                style={{ width: 36, height: 36, opacity: 0.5, cursor: 'not-allowed' }}
+                                disabled
+                                title={expired ? 'Expired' : 'No signed URL yet'}
+                                aria-label="Play (disabled)"
+                                type="button"
+                              >
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                  <path d="M9 7v10l8-5-8-5Z" fill="currentColor" />
+                                </svg>
+                              </button>
+                            )}
 
-                                  const { error: rmErr } = await supabase.storage.from('group-scores').remove([s.storage_path])
-                                  // If file is already gone, we still consider it ok.
-                                  if (rmErr) console.warn('[group-scores] remove failed', rmErr)
+                            {canAdmin && (
+                              <button
+                                className={`${styles.iconBtn} ${styles.iconBtnDark}`}
+                                style={{ width: 36, height: 36 }}
+                                type="button"
+                                title="Settings"
+                                aria-label="Settings"
+                                onClick={() => {
+                                  if (scoreEditId === s.id) {
+                                    setScoreEditId(null)
+                                    return
+                                  }
+                                  setScoreEditId(s.id)
+                                  setScoreEditDisplayName(s.display_name ?? '')
+                                  setScoreEditExpiresAt(s.expires_at ? String(s.expires_at).slice(0, 10) : '')
+                                }}
+                              >
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                  <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke="currentColor" strokeWidth="2" />
+                                  <path
+                                    d="M19.4 15a8.3 8.3 0 0 0 .1-6l2-1.6-2-3.4-2.4 1a8.5 8.5 0 0 0-5.2-3l-.4-2.6H9.5L9.1 2a8.5 8.5 0 0 0-5.2 3l-2.4-1-2 3.4L1.6 9a8.3 8.3 0 0 0 .1 6l-2 1.6 2 3.4 2.4-1a8.5 8.5 0 0 0 5.2 3l.4 2.6h3.9l.4-2.6a8.5 8.5 0 0 0 5.2-3l2.4 1 2-3.4-2-1.6Z"
+                                    stroke="currentColor"
+                                    strokeWidth="2"
+                                    strokeLinejoin="round"
+                                  />
+                                </svg>
+                              </button>
+                            )}
 
-                                  setScores((cur) => cur.filter((x) => x.id !== s.id))
-                                  setScoreUrls((cur) => {
-                                    const next = { ...cur }
-                                    delete next[s.id]
-                                    return next
-                                  })
-                                } catch (e: any) {
-                                  setScoresError(e?.message ? String(e.message) : 'Failed to delete')
-                                }
-                              }}
-                            >
-                              Delete
-                            </button>
-                          )}
+                            {canAdmin && (
+                              <button
+                                className={`${styles.iconBtn} ${styles.iconBtnDark}`}
+                                style={{ width: 36, height: 36 }}
+                                type="button"
+                                title="Delete"
+                                aria-label="Delete"
+                                onClick={async () => {
+                                  if (!confirm(`Delete "${title}"? This will remove it for all group members.`)) return
+                                  setScoresError(null)
+                                  try {
+                                    const { error: dbErr } = await supabase.from('group_scores').delete().eq('id', s.id).eq('group_id', groupId)
+                                    if (dbErr) throw dbErr
+
+                                    const { error: rmErr } = await supabase.storage.from('group-scores').remove([s.storage_path])
+                                    // If file is already gone, we still consider it ok.
+                                    if (rmErr) console.warn('[group-scores] remove failed', rmErr)
+
+                                    setScores((cur) => cur.filter((x) => x.id !== s.id))
+                                    setScoreUrls((cur) => {
+                                      const next = { ...cur }
+                                      delete next[s.id]
+                                      return next
+                                    })
+                                    if (scoreEditId === s.id) setScoreEditId(null)
+                                  } catch (e: any) {
+                                    setScoresError(e?.message ? String(e.message) : 'Failed to delete')
+                                  }
+                                }}
+                              >
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                  <path d="M4 7h16" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <path d="M10 11v7M14 11v7" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <path d="M9 7l1-2h4l1 2" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                                  <path d="M6 7l1 14h10l1-14" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+                            )}
+
+                            {canAdmin && (
+                              <div className={styles.reorderCtl} title="Reorder">
+                                <button
+                                  className={styles.reorderCtlBtn}
+                                  type="button"
+                                  aria-label="Move up"
+                                  disabled={idx <= 0}
+                                  onClick={async () => {
+                                    try {
+                                      setScoresError(null)
+                                      await moveScore(s.id, -1)
+                                    } catch (e: any) {
+                                      setScoresError(e?.message ? String(e.message) : 'Failed to reorder')
+                                    }
+                                  }}
+                                >
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M12 7l-6 6h12l-6-6Z" fill="currentColor" />
+                                  </svg>
+                                </button>
+                                <div className={styles.reorderCtlDivider} />
+                                <button
+                                  className={styles.reorderCtlBtn}
+                                  type="button"
+                                  aria-label="Move down"
+                                  disabled={idx < 0 || idx >= scores.length - 1}
+                                  onClick={async () => {
+                                    try {
+                                      setScoresError(null)
+                                      await moveScore(s.id, 1)
+                                    } catch (e: any) {
+                                      setScoresError(e?.message ? String(e.message) : 'Failed to reorder')
+                                    }
+                                  }}
+                                >
+                                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                                    <path d="M12 17l6-6H6l6 6Z" fill="currentColor" />
+                                  </svg>
+                                </button>
+                              </div>
+                            )}
+                          </div>
                         </div>
+
+                        {canAdmin && scoreEditId === s.id && (
+                          <div style={{ border: '1px solid #e5e7eb', borderRadius: 12, padding: 12, background: '#fafafa' }}>
+                            <div className={styles.row} style={{ marginBottom: 10 }}>
+                              <input
+                                type="text"
+                                value={scoreEditDisplayName}
+                                onChange={(e) => setScoreEditDisplayName(e.target.value)}
+                                placeholder="Display name (optional)"
+                                style={{ height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px', minWidth: 260 }}
+                              />
+                              <label className={styles.mutedDark} style={{ fontSize: 13 }}>
+                                Expires
+                                <input
+                                  type="date"
+                                  value={scoreEditExpiresAt}
+                                  onChange={(e) => setScoreEditExpiresAt(e.target.value)}
+                                  style={{ marginLeft: 10, height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px' }}
+                                />
+                              </label>
+                            </div>
+                            <div className={styles.row}>
+                              <button
+                                className={`${styles.btn} ${styles.btnPrimary}`}
+                                type="button"
+                                onClick={async () => {
+                                  setScoresError(null)
+                                  try {
+                                    const nextDisplay = scoreEditDisplayName.trim() ? scoreEditDisplayName.trim() : null
+                                    const nextExpires = scoreEditExpiresAt ? new Date(`${scoreEditExpiresAt}T23:59:59`).toISOString() : null
+
+                                    const { error: upErr } = await supabase
+                                      .from('group_scores')
+                                      .update({ display_name: nextDisplay, expires_at: nextExpires })
+                                      .eq('id', s.id)
+                                      .eq('group_id', groupId)
+                                    if (upErr) throw upErr
+
+                                    setScores((cur) =>
+                                      cur.map((x) => (x.id === s.id ? { ...x, display_name: nextDisplay, expires_at: nextExpires } : x))
+                                    )
+                                    setScoreEditId(null)
+                                  } catch (e: any) {
+                                    setScoresError(e?.message ? String(e.message) : 'Failed to save settings')
+                                  }
+                                }}
+                              >
+                                Save
+                              </button>
+                              <button
+                                className={styles.btn}
+                                type="button"
+                                onClick={() => {
+                                  setScoreEditId(null)
+                                  setScoreEditDisplayName('')
+                                  setScoreEditExpiresAt('')
+                                }}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                            <div className={styles.mutedDark} style={{ fontSize: 13, marginTop: 8 }}>
+                              Changes are saved for the whole group.
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )
                   })}
@@ -1030,28 +1345,10 @@ export default function GroupPage() {
 
               {canAdmin && (
                 <div style={{ marginTop: 14 }}>
-                  <div className={styles.muted} style={{ fontSize: 13, marginBottom: 8 }}>
+                  <div className={styles.mutedDark} style={{ fontSize: 13, marginBottom: 8 }}>
                     Upload MXL / MusicXML (admins only)
                   </div>
-                  <div className={styles.row} style={{ marginBottom: 10 }}>
-                    <label className={styles.muted} style={{ fontSize: 13 }}>
-                      Expires
-                      <input
-                        type="date"
-                        value={uploadExpiresAt}
-                        onChange={(e) => setUploadExpiresAt(e.target.value)}
-                        style={{ marginLeft: 10, height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px' }}
-                      />
-                    </label>
-                    <input
-                      type="text"
-                      value={uploadDisplayName}
-                      onChange={(e) => setUploadDisplayName(e.target.value)}
-                      placeholder="Display name (optional)"
-                      style={{ height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px', minWidth: 260 }}
-                    />
-                  </div>
-                  <label className={styles.muted} style={{ display: 'block', fontSize: 13, lineHeight: 1.35, marginBottom: 10 }}>
+                  <label className={styles.mutedDark} style={{ display: 'block', fontSize: 13, lineHeight: 1.35, marginBottom: 10 }}>
                     <input
                       type="checkbox"
                       checked={uploadAttest}
@@ -1064,90 +1361,200 @@ export default function GroupPage() {
                     <input
                       type="file"
                       accept=".mxl,.xml,.musicxml,application/vnd.recordare.musicxml+xml,application/xml,text/xml"
-                      disabled={uploadBusy || !uploadAttest || !uploadExpiresAt}
-                      onChange={async (e) => {
+                      disabled={uploadBusy || !uploadAttest}
+                      onChange={(e) => {
                         setUploadError(null)
-                        const f = e.target.files?.[0]
-                        if (!f) return
-                        if (!uploadExpiresAt) {
-                          setUploadError('Please set an expiry date first.')
-                          e.target.value = ''
-                          return
+                        const f = e.target.files?.[0] ?? null
+                        setUploadFile(f)
+                        if (f) {
+                          setUploadDraftDisplayName('')
+                          setUploadDraftExpiresAt('')
                         }
-                        if (!uploadAttest) {
-                          setUploadError('Please confirm the rights/permissions checkbox first.')
-                          e.target.value = ''
-                          return
-                        }
-                        setUploadBusy(true)
-                        try {
-                          const safe = sanitizeFilename(f.name || 'score.mxl')
-                          const displayName = (uploadDisplayName || safe).trim()
-                          const ext = safe.toLowerCase().endsWith('.mxl')
-                            ? 'mxl'
-                            : safe.toLowerCase().endsWith('.musicxml')
-                              ? 'musicxml'
-                              : 'xml'
-                          const id = crypto.randomUUID()
-                          const path = `${groupId}/${id}.${ext}`
-
-                          const { error: upErr } = await supabase.storage
-                            .from('group-scores')
-                            .upload(path, f, { upsert: false, contentType: f.type || undefined })
-                          if (upErr) throw upErr
-
-                          const { data: sessionData } = await supabase.auth.getSession()
-                          const userId = sessionData.session?.user?.id
-                          if (!userId) throw new Error('Not logged in')
-
-                          const expiresIso = new Date(`${uploadExpiresAt}T23:59:59`).toISOString()
-                          const { error: dbErr } = await supabase.from('group_scores').insert({
-                            group_id: groupId,
-                            storage_path: path,
-                            filename: safe,
-                            display_name: displayName,
-                            expires_at: expiresIso,
-                            content_type: f.type || null,
-                            created_by: userId,
-                          })
-                          if (dbErr) throw dbErr
-
-                          // Refresh list
-                          const { data, error } = await supabase
-                            .from('group_scores')
-                            .select('id,filename,display_name,expires_at,storage_path,created_at,created_by')
-                            .eq('group_id', groupId)
-                            .order('created_at', { ascending: false })
-                          if (error) throw error
-                          const rows = (data ?? []) as any as GroupScoreRow[]
-                          setScores(rows)
-
-                          const nextUrls: Record<string, string> = {}
-                          await Promise.all(
-                            rows.map(async (s) => {
-                              try {
-                                const { data, error } = await supabase.storage.from('group-scores').createSignedUrl(s.storage_path, 60 * 30)
-                                if (!error && data?.signedUrl) nextUrls[s.id] = data.signedUrl
-                              } catch {}
-                            })
-                          )
-                          setScoreUrls(nextUrls)
-                        } catch (err: any) {
-                          setUploadError(err?.message ? String(err.message) : 'Upload failed')
-                        } finally {
-                          setUploadBusy(false)
-                          e.target.value = ''
-                        }
+                        e.target.value = ''
                       }}
                     />
-                    {uploadBusy && <span className={styles.muted}>Uploading…</span>}
-                    {!uploadBusy && !uploadExpiresAt && <span className={styles.muted}>Set expiry date to enable upload.</span>}
-                    {!uploadBusy && uploadExpiresAt && !uploadAttest && <span className={styles.muted}>Confirm rights to enable upload.</span>}
+                    {uploadBusy && <span className={styles.mutedDark}>Uploading…</span>}
+                    {!uploadBusy && !uploadAttest && <span className={styles.mutedDark}>Confirm rights to enable upload.</span>}
                   </div>
-                  {uploadError && <div style={{ marginTop: 10, color: '#991b1b', fontWeight: 700 }}>{uploadError}</div>}
+
+                  {uploadFile && (
+                    <div style={{ marginTop: 12, border: '1px solid #e5e7eb', borderRadius: 12, padding: 12, background: '#fafafa' }}>
+                      <div style={{ fontWeight: 700, color: '#111827' }}>Upload details</div>
+                      <div className={styles.mutedDark} style={{ fontSize: 13, marginTop: 6 }}>
+                        File: {uploadFile.name}
+                      </div>
+
+                      <div className={styles.row} style={{ marginTop: 10 }}>
+                        <input
+                          type="text"
+                          value={uploadDraftDisplayName}
+                          onChange={(e) => setUploadDraftDisplayName(e.target.value)}
+                          placeholder="Display name (optional)"
+                          style={{ height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px', minWidth: 260 }}
+                        />
+                        <label className={styles.mutedDark} style={{ fontSize: 13 }}>
+                          Expires
+                          <input
+                            type="date"
+                            value={uploadDraftExpiresAt}
+                            onChange={(e) => setUploadDraftExpiresAt(e.target.value)}
+                            style={{ marginLeft: 10, height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px' }}
+                          />
+                        </label>
+                      </div>
+
+                      <div className={styles.row} style={{ marginTop: 10 }}>
+                        <button
+                          className={`${styles.btn} ${styles.btnPrimary}`}
+                          type="button"
+                          disabled={uploadBusy}
+                          onClick={async () => {
+                            setUploadError(null)
+                            const f = uploadFile
+                            if (!f) return
+                            if (!uploadDraftExpiresAt) {
+                              setUploadError('Please set an expiry date.')
+                              return
+                            }
+                            if (!uploadAttest) {
+                              setUploadError('Please confirm the rights/permissions checkbox first.')
+                              return
+                            }
+
+                            setUploadBusy(true)
+                            try {
+                              const safe = sanitizeFilename(f.name || 'score.mxl')
+                              const nextDisplay = uploadDraftDisplayName.trim() ? uploadDraftDisplayName.trim() : null
+                              const ext = safe.toLowerCase().endsWith('.mxl')
+                                ? 'mxl'
+                                : safe.toLowerCase().endsWith('.musicxml')
+                                  ? 'musicxml'
+                                  : 'xml'
+                              const id = crypto.randomUUID()
+                              const path = `${groupId}/${id}.${ext}`
+
+                              const { error: upErr } = await supabase.storage
+                                .from('group-scores')
+                                .upload(path, f, { upsert: false, contentType: f.type || undefined })
+                              if (upErr) throw upErr
+
+                              const { data: sessionData } = await supabase.auth.getSession()
+                              const userId = sessionData.session?.user?.id
+                              if (!userId) throw new Error('Not logged in')
+
+                              // Append at end of current ordering.
+                              let nextOrder = scores.reduce((mx, s) => {
+                                const v = typeof s.sort_order === 'number' ? s.sort_order : -1
+                                return Math.max(mx, v)
+                              }, -1) + 1
+                              if (!Number.isFinite(nextOrder)) nextOrder = 0
+
+                              const expiresIso = new Date(`${uploadDraftExpiresAt}T23:59:59`).toISOString()
+                              const { error: dbErr } = await supabase.from('group_scores').insert({
+                                group_id: groupId,
+                                storage_path: path,
+                                filename: safe,
+                                display_name: nextDisplay,
+                                expires_at: expiresIso,
+                                sort_order: nextOrder,
+                                content_type: f.type || null,
+                                created_by: userId,
+                              })
+                              if (dbErr) throw dbErr
+
+                              // Refresh list
+                              const { data, error } = await supabase
+                                .from('group_scores')
+                                .select('id,filename,display_name,expires_at,sort_order,storage_path,created_at,created_by')
+                                .eq('group_id', groupId)
+                                .order('sort_order', { ascending: true, nullsFirst: false })
+                                .order('created_at', { ascending: true })
+                              if (error) throw error
+                              const rows = (data ?? []) as any as GroupScoreRow[]
+                              setScores(rows)
+
+                              const nextUrls: Record<string, string> = {}
+                              await Promise.all(
+                                rows.map(async (s) => {
+                                  try {
+                                    const { data, error } = await supabase.storage.from('group-scores').createSignedUrl(s.storage_path, 60 * 30)
+                                    if (!error && data?.signedUrl) nextUrls[s.id] = data.signedUrl
+                                  } catch {}
+                                })
+                              )
+                              setScoreUrls(nextUrls)
+
+                              setUploadFile(null)
+                              setUploadDraftDisplayName('')
+                              setUploadDraftExpiresAt('')
+                            } catch (err: any) {
+                              setUploadError(err?.message ? String(err.message) : 'Upload failed')
+                            } finally {
+                              setUploadBusy(false)
+                            }
+                          }}
+                        >
+                          Upload
+                        </button>
+                        <button
+                          className={styles.btn}
+                          type="button"
+                          disabled={uploadBusy}
+                          onClick={() => {
+                            setUploadFile(null)
+                            setUploadDraftDisplayName('')
+                            setUploadDraftExpiresAt('')
+                            setUploadError(null)
+                          }}
+                        >
+                          Cancel
+                        </button>
+                        {!uploadBusy && !uploadDraftExpiresAt && <span className={styles.mutedDark}>Expiry date is required.</span>}
+                      </div>
+
+                      {uploadError && <div style={{ marginTop: 10, color: '#991b1b', fontWeight: 700 }}>{uploadError}</div>}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
+
+            {membership?.status === 'active' && (
+              <div className={styles.card}>
+                <div className={styles.sectionTitle}>Danger zone</div>
+                <div className={styles.mutedDark} style={{ marginBottom: 10 }}>
+                  Leave the group. You can request access again via an invite link.
+                </div>
+                <button
+                  className={styles.btn}
+                  style={{
+                    borderColor: 'rgba(239, 68, 68, 0.35)',
+                    background: 'rgba(239, 68, 68, 0.10)',
+                    color: '#991b1b',
+                  }}
+                  onClick={async () => {
+                    if (!sessionToken) return
+                    const ok = confirm('Leave this group? (Admins can only leave if another admin remains, or if the group is empty.)')
+                    if (!ok) return
+                    try {
+                      const r = await fetch(`/api/groups/${groupId}/leave`, {
+                        method: 'POST',
+                        headers: { Authorization: `Bearer ${sessionToken}` },
+                      })
+                      const j = await r.json().catch(() => ({}))
+                      if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
+                      router.replace('/groups')
+                    } catch (e: any) {
+                      alert(e?.message ? String(e.message) : 'Failed to leave group')
+                    }
+                  }}
+                  disabled={!sessionToken}
+                  title="Leave group"
+                >
+                  Leave group
+                </button>
+              </div>
+            )}
           </>
         )}
       </div>

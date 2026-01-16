@@ -26,6 +26,10 @@
   color: #cbd5e1;
 }
 
+.mutedDark {
+  color: #6b7280;
+}
+
 .row {
   display: flex;
   gap: 10px;
@@ -45,6 +49,69 @@
   text-decoration: none;
   display: inline-flex;
   align-items: center;
+}
+
+.iconBtn {
+  width: 40px;
+  height: 40px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #f9fafb;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.iconBtn:hover {
+  background: rgba(255, 255, 255, 0.10);
+}
+
+.iconBtnDark {
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  color: #111827;
+}
+
+.iconBtnDark:hover {
+  background: #f9fafb;
+}
+
+.reorderCtl {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+}
+
+.reorderCtlBtn {
+  border: 0;
+  background: transparent;
+  color: #111827;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 0;
+}
+
+.reorderCtlBtn:hover {
+  background: #f9fafb;
+}
+
+.reorderCtlBtn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.reorderCtlDivider {
+  border-top: 1px solid #e5e7eb;
 }
 
 .btnPrimary {
@@ -112,6 +179,20 @@
   font-weight: 700;
   font-size: 22px;
   text-shadow: 0 8px 30px rgba(0,0,0,0.45);
+}
+
+.coverGear {
+  position: absolute;
+  right: 14px;
+  bottom: 12px;
+  z-index: 2;
+}
+
+.cardHeaderRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
 }
 
 .textarea {

@@ -233,25 +233,6 @@ export default function GroupsPage() {
         ) : (
           <>
             <div className={styles.card}>
-              <div className={styles.sectionTitle}>Create group</div>
-              <div className={styles.row}>
-                <input
-                  className={styles.input}
-                  value={groupName}
-                  onChange={(e) => setGroupName(e.target.value)}
-                  placeholder="Group name (e.g. St. Mary’s Choir)"
-                />
-                <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={createGroup} disabled={busy}>
-                  {busy ? 'Creating…' : 'Create'}
-                </button>
-                <button className={styles.btn} onClick={refreshGroups} disabled={busy}>
-                  Refresh
-                </button>
-              </div>
-              {error && <div className={styles.alert}>{error}</div>}
-            </div>
-
-            <div className={styles.card}>
               <div className={styles.sectionTitle}>My groups</div>
               {groups.length === 0 ? (
                 <p className={styles.muted}>No groups yet.</p>
@@ -303,6 +284,25 @@ export default function GroupsPage() {
                   Back to home
                 </a>
               </p>
+            </div>
+
+            <div className={styles.card}>
+              <div className={styles.sectionTitle}>Create group</div>
+              <div className={styles.row}>
+                <input
+                  className={styles.input}
+                  value={groupName}
+                  onChange={(e) => setGroupName(e.target.value)}
+                  placeholder="Group name (e.g. St. Mary’s Choir)"
+                />
+                <button className={`${styles.btn} ${styles.btnPrimary}`} onClick={createGroup} disabled={busy}>
+                  {busy ? 'Creating…' : 'Create'}
+                </button>
+                <button className={styles.btn} onClick={refreshGroups} disabled={busy}>
+                  Refresh
+                </button>
+              </div>
+              {error && <div className={styles.alert}>{error}</div>}
             </div>
           </>
         )}

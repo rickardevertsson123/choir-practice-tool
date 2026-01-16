@@ -295,8 +295,37 @@ export default function ProfilePage() {
           </div>
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-          <a href="/groups" style={{ color: '#e5e7eb', textDecoration: 'none' }}>
-            Home
+          <a
+            href="/groups"
+            title="Home"
+            aria-label="Home"
+            style={{
+              width: 40,
+              height: 40,
+              borderRadius: 999,
+              border: '1px solid rgba(255,255,255,0.16)',
+              background: 'rgba(255,255,255,0.06)',
+              color: '#f9fafb',
+              display: 'inline-flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              textDecoration: 'none',
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path
+                d="M3 10.5 12 3l9 7.5V20a1.8 1.8 0 0 1-1.8 1.8H4.8A1.8 1.8 0 0 1 3 20v-9.5Z"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinejoin="round"
+              />
+              <path
+                d="M9.5 21.8V14h5v7.8"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinejoin="round"
+              />
+            </svg>
           </a>
         </div>
       </div>

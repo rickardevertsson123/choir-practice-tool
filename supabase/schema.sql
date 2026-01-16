@@ -321,6 +321,7 @@ create table if not exists public.group_scores (
   filename text not null,
   display_name text,
   expires_at timestamptz,
+  sort_order integer,
   content_type text,
   created_by uuid not null references public.profiles(id),
   created_at timestamptz not null default now()
@@ -331,7 +332,8 @@ alter table public.group_scores enable row level security;
 -- If you applied an older schema already, ensure new columns exist:
 alter table public.group_scores
   add column if not exists display_name text,
-  add column if not exists expires_at timestamptz;
+  add column if not exists expires_at timestamptz,
+  add column if not exists sort_order integer;
 
 -- Active members can list scores for their groups.
 create policy "group_scores_select_active_members"
@@ -351,6 +353,28 @@ on public.group_scores for insert
 with check (
   created_by = auth.uid()
   and exists (
+    select 1 from public.group_memberships m
+    where m.group_id = group_scores.group_id
+      and m.user_id = auth.uid()
+      and m.role = 'admin'
+      and m.status = 'active'
+  )
+);
+
+-- Active admins can update score metadata in their groups (e.g. display_name / expires_at).
+create policy "group_scores_update_admin"
+on public.group_scores for update
+using (
+  exists (
+    select 1 from public.group_memberships m
+    where m.group_id = group_scores.group_id
+      and m.user_id = auth.uid()
+      and m.role = 'admin'
+      and m.status = 'active'
+  )
+)
+with check (
+  exists (
     select 1 from public.group_memberships m
     where m.group_id = group_scores.group_id
       and m.user_id = auth.uid()
