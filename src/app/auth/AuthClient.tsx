@@ -23,6 +23,14 @@ export default function AuthClient() {
   const DISABLE_SIGNUP =
     String(process.env.NEXT_PUBLIC_DISABLE_SIGNUP ?? 'false').toLowerCase() === 'true'
 
+  // IMPORTANT: email verification links use `emailRedirectTo`. If we build that from
+  // `window.location.origin` during local dev, the verification link will send users to localhost.
+  // In production, set NEXT_PUBLIC_SITE_URL=https://choirup.com (or your canonical domain).
+  const SITE_URL =
+    (process.env.NEXT_PUBLIC_SITE_URL && String(process.env.NEXT_PUBLIC_SITE_URL)) ||
+    (typeof window !== 'undefined' ? window.location.origin : '')
+  const SITE_ORIGIN = SITE_URL.replace(/\/+$/, '')
+
   useEffect(() => {
     // If already logged in, go to groups.
     let cancelled = false
@@ -57,7 +65,9 @@ export default function AuthClient() {
           return
         }
         const redirectTo =
-          redirect && redirect.startsWith('/join/') ? `${window.location.origin}${redirect}` : `${window.location.origin}/groups`
+          redirect && redirect.startsWith('/join/')
+            ? `${SITE_ORIGIN}${redirect}`
+            : `${SITE_ORIGIN}/groups`
         const dn = displayName.trim()
         if (!dn) {
           setError('Please enter a display name.')
