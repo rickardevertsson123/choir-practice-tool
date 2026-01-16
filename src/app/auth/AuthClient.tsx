@@ -138,6 +138,11 @@ export default function AuthClient() {
             : 'Sign in to access your groups.'}
         </div>
 
+        <div className={styles.notice}>
+          <strong>Under construction:</strong> ChoirUp is in active development. Accounts, groups, and uploaded material may be changed or removed during
+          updates.
+        </div>
+
         <div className={styles.tabs} role="tablist" aria-label="Auth mode">
           <button
             type="button"

@@ -23,6 +23,11 @@ export default function HomePage() {
               </div>
             </div>
 
+            <div className={styles.notice}>
+              <strong>Under construction:</strong> ChoirUp is in active development. Accounts, groups, and uploaded material may be changed or removed
+              during updates.
+            </div>
+
             <div className={styles.tagline}>Practice together. Sing better. Share music responsibly.</div>
             <div className={styles.lede}>
               ChoirUp is a free practice tool for singers and choirs. Practice music locally in your browser, or—if your group has the right to share

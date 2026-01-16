@@ -39,6 +39,22 @@
   z-index: 1;
 }
 
+.notice {
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(255, 255, 255, 0.06);
+  color: #e5e7eb;
+  font-size: 13px;
+  line-height: 1.35;
+  max-width: 760px;
+}
+
+.notice strong {
+  color: #f9fafb;
+}
+
 .brandRow {
   display: flex;
   align-items: center;
