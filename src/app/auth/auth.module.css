@@ -93,6 +93,42 @@
   color: #111827;
 }
 
+.inputRow {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.inputWithIcon {
+  padding-right: 42px;
+  width: 100%;
+}
+
+.eyeBtn {
+  position: absolute;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  color: #111827;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.eyeBtn:hover {
+  background: #f9fafb;
+}
+
+.eyeBtn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.25);
+  border-color: rgba(249, 115, 22, 0.55);
+}
+
 .input:focus {
   border-color: #f97316;
   box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.25);
