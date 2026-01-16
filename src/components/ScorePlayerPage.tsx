@@ -5,7 +5,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { useSearchParams } from 'next/navigation'
+import { useRouter, useSearchParams } from 'next/navigation'
 import { OpenSheetMusicDisplay } from 'opensheetmusicdisplay'
 import JSZip from 'jszip'
 
@@ -50,6 +50,7 @@ function clamp(v: number, min: number, max: number) {
 }
 
 export default function ScorePlayerPage() {
+  const router = useRouter()
   const search = useSearchParams()
   // Evaluation mode:
   // - false (default): evaluate pitch vs nearest semitone (raw intonation), no score target note.
@@ -1417,7 +1418,34 @@ export default function ScorePlayerPage() {
     <div className="score-player-page">
       <header className="top-bar">
         <div className="top-bar__row">
-          <h1>ChoirUp</h1>
+          <div className="top-bar__left">
+            <button
+              type="button"
+              className="top-bar__iconBtn"
+              aria-label="Back"
+              title="Back"
+              onClick={() => {
+                try {
+                  if (typeof window !== 'undefined' && window.history.length > 1) {
+                    router.back()
+                  } else {
+                    router.push('/')
+                  }
+                } catch {
+                  router.push('/')
+                }
+              }}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M15 18l-6-6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <h1 className="top-bar__brand">
+              <a href="/" aria-label="ChoirUp home">
+                ChoirUp
+              </a>
+            </h1>
+          </div>
           <button type="button" className="top-bar__infoBtn" aria-label="About" title="About" onClick={() => setAboutOpen(true)}>
             ?
           </button>

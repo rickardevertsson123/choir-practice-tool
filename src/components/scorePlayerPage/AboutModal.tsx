@@ -39,19 +39,6 @@ export function AboutModal(props: { open: boolean; onClose: () => void }) {
             <strong>Tip:</strong> Using a laptop’s built-in microphone and speakers can work poorly. For best results, use an
             external microphone or a headset.
           </p>
-
-          <p>
-            <strong>Latency:</strong> The delay from sound output to when the browser detects your singing can be tricky. Use
-            <strong> Easy</strong> difficulty or adjust latency compensation manually if needed. Improvements will come over time.
-          </p>
-
-          <p className="about-modal__license">
-            <strong>License:</strong> This program and its source code are free to use, but may not be used for commercial
-            purposes without the author’s permission.
-          </p>
-          <p>
-            <strong>Power to the Choir!</strong> Enjoy singing and have fun!
-          </p>
         </div>
       </div>
     </div>

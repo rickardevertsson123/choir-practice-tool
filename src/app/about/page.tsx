@@ -1,5 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import styles from './about.module.css'
+import Image from 'next/image'
 
 const ABOUT_MD = `# About ChoirUp
 
@@ -37,21 +39,26 @@ No ads. No tracking. No analysis of your music or your singing.
 
 export default function AboutPage() {
   return (
-    <div style={{ maxWidth: 980, margin: '40px auto', padding: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-        <div style={{ fontSize: 22, fontWeight: 700, color: '#f9fafb' }}>About</div>
-        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-          <a href="/" style={{ color: '#e5e7eb' }}>
-            Home
-          </a>
-          <a href="/terms" style={{ color: '#e5e7eb' }}>
-            Terms
-          </a>
+    <div className={styles.page}>
+      <div className={styles.header}>
+        <div className={styles.title}>
+          <div className={styles.titleLogo} aria-hidden="true">
+            <Image src="/logo.png" alt="" width={32} height={32} />
+          </div>
+          About
+        </div>
+        <div className={styles.nav}>
+          <a href="/">Home</a>
+          <a href="/terms">Terms</a>
         </div>
       </div>
 
-      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: 18, color: '#111827' }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{ABOUT_MD}</ReactMarkdown>
+      <div className={styles.card}>
+        <div className={styles.content}>
+          <div className={styles.markdown}>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{ABOUT_MD}</ReactMarkdown>
+          </div>
+        </div>
       </div>
     </div>
   )
