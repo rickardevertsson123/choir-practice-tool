@@ -33,6 +33,7 @@ export async function POST(request: Request) {
   const { error: ep } = await supabase.from('profiles').upsert({
     id: user.id,
     email: user.email ?? null,
+    ...(user.display_name ? { display_name: user.display_name } : {}),
   })
   if (ep) return NextResponse.json({ error: ep.message }, { status: 500 })
 

@@ -4,6 +4,7 @@ export type AuthedUser = {
   id: string
   email: string | null
   email_confirmed_at: string | null
+  display_name: string | null
 }
 
 export async function requireUser(request: Request): Promise<AuthedUser> {
@@ -25,6 +26,7 @@ export async function requireUser(request: Request): Promise<AuthedUser> {
     id: u.id,
     email: u.email ?? null,
     email_confirmed_at: (u as any).email_confirmed_at ?? null,
+    display_name: ((u as any)?.user_metadata?.display_name as string | undefined)?.trim?.() || null,
   }
 }
 

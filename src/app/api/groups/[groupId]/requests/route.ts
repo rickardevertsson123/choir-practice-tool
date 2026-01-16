@@ -28,7 +28,7 @@ export async function GET(
 
   const { data, error } = await supabase
     .from('group_memberships')
-    .select('user_id,role,status,created_at,profiles:profiles(email,display_name)')
+    .select('user_id,role,status,created_at,profiles:profiles(email,display_name,avatar_path)')
     .eq('group_id', groupId)
     .eq('status', 'pending')
     .order('created_at', { ascending: true })
@@ -40,6 +40,7 @@ export async function GET(
     createdAt: r.created_at as string,
     email: r.profiles?.email ?? null,
     displayName: r.profiles?.display_name ?? null,
+    avatarPath: r.profiles?.avatar_path ?? null,
   }))
 
   return NextResponse.json({ pending })

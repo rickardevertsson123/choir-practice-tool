@@ -26,6 +26,7 @@ type PendingRequest = {
   createdAt: string
   email: string | null
   displayName: string | null
+  avatarPath: string | null
 }
 
 type MemberRow = {
@@ -35,6 +36,7 @@ type MemberRow = {
   createdAt: string
   email: string | null
   displayName: string | null
+  avatarPath: string | null
 }
 
 type GroupScoreRow = {
@@ -68,6 +70,7 @@ export default function GroupPage() {
   const [members, setMembers] = useState<MemberRow[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
   const [membersError, setMembersError] = useState<string | null>(null)
+  const [avatarUrls, setAvatarUrls] = useState<Record<string, string>>({})
 
   const [coverUrl, setCoverUrl] = useState<string | null>(null)
   const [coverBusy, setCoverBusy] = useState(false)
@@ -315,35 +318,87 @@ export default function GroupPage() {
     }
   }, [groupId, membership, sessionToken])
 
+  async function refreshMembers() {
+    setMembersError(null)
+    setMembers([])
+    if (!groupId || !sessionToken) return
+    if (!(membership?.status === 'active')) return
+    setMembersLoading(true)
+    try {
+      const r = await fetch(`/api/groups/${groupId}/members`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      })
+      const j = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
+      setMembers(Array.isArray(j?.members) ? j.members : [])
+    } catch (e: any) {
+      setMembersError(e?.message ? String(e.message) : 'Failed to load members')
+    } finally {
+      setMembersLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!groupId || !sessionToken || !membership?.status) return
+    if (membership.status !== 'active') return
+    refreshMembers()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [groupId, membership?.status, sessionToken])
+
+  useEffect(() => {
+    if (!(membership?.status === 'active' && membership?.role === 'admin')) return
+    const id = window.setInterval(() => {
+      refreshMembers()
+    }, 30000)
+    return () => window.clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [membership?.status, membership?.role, groupId, sessionToken])
+
   useEffect(() => {
     let cancelled = false
-    async function loadMembers() {
-      setMembersError(null)
-      setMembers([])
-      if (!groupId || !sessionToken) return
-      if (!(membership?.status === 'active' && membership?.role === 'admin')) return
-      setMembersLoading(true)
-      try {
-        const r = await fetch(`/api/groups/${groupId}/members`, {
-          method: 'GET',
-          headers: { Authorization: `Bearer ${sessionToken}` },
-        })
-        const j = await r.json().catch(() => ({}))
-        if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
-        if (cancelled) return
-        setMembers(Array.isArray(j?.members) ? j.members : [])
-      } catch (e: any) {
-        if (cancelled) return
-        setMembersError(e?.message ? String(e.message) : 'Failed to load members')
-      } finally {
-        if (!cancelled) setMembersLoading(false)
+    async function loadAvatarUrls() {
+      const pairs: Array<{ userId: string; path: string }> = []
+      for (const m of members) {
+        if (m.avatarPath) pairs.push({ userId: m.userId, path: m.avatarPath })
       }
+      for (const p of pending) {
+        if (p.avatarPath) pairs.push({ userId: p.userId, path: p.avatarPath })
+      }
+
+      if (pairs.length === 0) {
+        setAvatarUrls({})
+        return
+      }
+
+      const next: Record<string, string> = {}
+      await Promise.all(
+        pairs.map(async (p) => {
+          try {
+            const { data, error } = await supabase.storage.from('user-avatars').createSignedUrl(p.path, 60 * 60)
+            if (error) return
+            if (data?.signedUrl) next[p.userId] = data.signedUrl
+          } catch {
+            // ignore
+          }
+        })
+      )
+      if (!cancelled) setAvatarUrls(next)
     }
-    loadMembers()
+    loadAvatarUrls()
     return () => {
       cancelled = true
     }
-  }, [groupId, membership, sessionToken])
+  }, [members, pending, supabase])
+
+  function initialsFromLabel(label: string) {
+    const s = label.trim()
+    if (!s) return '?'
+    const parts = s.split(/\s+/).filter(Boolean)
+    const a = parts[0]?.[0] || '?'
+    const b = parts.length > 1 ? parts[1][0] : ''
+    return (a + b).toUpperCase()
+  }
 
   if (loading) {
     return (
@@ -582,12 +637,32 @@ export default function GroupPage() {
                           flexWrap: 'wrap',
                         }}
                       >
-                        <div>
+                        <div style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+                          <div
+                            style={{
+                              width: 32,
+                              height: 32,
+                              borderRadius: 999,
+                              border: '1px solid #e5e7eb',
+                              background: avatarUrls[p.userId] ? `url(${avatarUrls[p.userId]}) center/cover no-repeat` : '#111827',
+                              color: '#fff',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              fontWeight: 700,
+                              fontSize: 12,
+                            }}
+                            aria-label="Avatar"
+                          >
+                            {!avatarUrls[p.userId] && initialsFromLabel(p.displayName || p.email || p.userId)}
+                          </div>
+                          <div>
                           <div style={{ fontWeight: 700, color: '#111827' }}>
                             {p.displayName || p.email || p.userId}
                           </div>
                           <div className={styles.muted} style={{ fontSize: 13 }}>
                             Requested: {new Date(p.createdAt).toLocaleString()}
+                          </div>
                           </div>
                         </div>
                         <div className={styles.row}>
@@ -707,9 +782,16 @@ export default function GroupPage() {
               </div>
             )}
 
-            {canAdmin && (
+            {membership?.status === 'active' && (
               <div className={styles.card}>
-                <div className={styles.sectionTitle}>Members</div>
+                <div className={styles.row} style={{ justifyContent: 'space-between' }}>
+                  <div className={styles.sectionTitle} style={{ marginBottom: 0 }}>
+                    Members
+                  </div>
+                  <button className={styles.btn} onClick={refreshMembers} disabled={!sessionToken || membersLoading}>
+                    Refresh
+                  </button>
+                </div>
                 {membersLoading && <div className={styles.muted}>Loading…</div>}
                 {membersError && <div style={{ color: '#991b1b', fontWeight: 800 }}>{membersError}</div>}
                 {!membersLoading && !membersError && members.length === 0 && (
@@ -739,6 +821,24 @@ export default function GroupPage() {
                           }}
                         >
                           <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                            <div
+                              style={{
+                                width: 32,
+                                height: 32,
+                                borderRadius: 999,
+                                border: '1px solid #e5e7eb',
+                                background: avatarUrls[m.userId] ? `url(${avatarUrls[m.userId]}) center/cover no-repeat` : '#111827',
+                                color: '#fff',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontWeight: 700,
+                                fontSize: 12,
+                              }}
+                              aria-label="Avatar"
+                            >
+                              {!avatarUrls[m.userId] && initialsFromLabel(label)}
+                            </div>
                             <div style={{ fontWeight: 700, color: '#111827' }}>{label}</div>
                             <span
                               style={{
@@ -804,7 +904,7 @@ export default function GroupPage() {
                               </>
                             )}
 
-                            {(m.status === 'pending' || m.role === 'member') && (
+                            {canAdmin && (m.status === 'pending' || m.role === 'member') && (
                               <button
                                 className={styles.btn}
                                 disabled={!sessionToken}

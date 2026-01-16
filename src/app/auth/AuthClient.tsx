@@ -13,6 +13,7 @@ export default function AuthClient() {
   const [mode, setMode] = useState<Mode>('login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
+  const [displayName, setDisplayName] = useState('')
   const [status, setStatus] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -55,12 +56,20 @@ export default function AuthClient() {
         }
         const redirectTo =
           redirect && redirect.startsWith('/join/') ? `${window.location.origin}${redirect}` : `${window.location.origin}/groups`
+        const dn = displayName.trim()
+        if (!dn) {
+          setError('Please enter a display name.')
+          return
+        }
         const { error: signUpErr } = await supabase.auth.signUp({
           email,
           password,
           options: {
             // Send users back to the site after email verification.
             emailRedirectTo: redirectTo,
+            data: {
+              display_name: dn,
+            },
           },
         })
         if (signUpErr) throw signUpErr
@@ -84,7 +93,14 @@ export default function AuthClient() {
 
       // Ensure a profile row exists (used for admin/owner counts + later group logic).
       try {
-        await supabase.from('profiles').upsert({ id: user.id, email: user.email ?? null })
+        const metaName = (user as any)?.user_metadata?.display_name
+        const { data: p } = await supabase.from('profiles').select('display_name').eq('id', user.id).maybeSingle()
+        const shouldSet = !p?.display_name && typeof metaName === 'string' && metaName.trim().length > 0
+        await supabase.from('profiles').upsert({
+          id: user.id,
+          email: user.email ?? null,
+          ...(shouldSet ? { display_name: metaName.trim() } : {}),
+        })
       } catch {
         // Ignore: schema might not be applied yet.
       }
@@ -150,6 +166,21 @@ export default function AuthClient() {
         )}
 
         <form onSubmit={onSubmit} className={styles.form}>
+          {mode === 'signup' && !DISABLE_SIGNUP && (
+            <label className={styles.fieldLabel}>
+              Display name
+              <input
+                className={styles.input}
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                type="text"
+                autoComplete="name"
+                required
+                placeholder="Your name (e.g. Rickard)"
+              />
+            </label>
+          )}
+
           <label className={styles.fieldLabel}>
             Email
             <input

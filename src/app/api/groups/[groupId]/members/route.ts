@@ -14,7 +14,7 @@ export async function GET(
   const { groupId } = await ctx.params
   const supabase = getSupabaseAdmin()
 
-  // Ensure caller is an active admin in this group.
+  // Ensure caller is an active member in this group (admin gets extra visibility).
   const { data: m, error: em } = await supabase
     .from('group_memberships')
     .select('role,status')
@@ -22,17 +22,19 @@ export async function GET(
     .eq('user_id', user.id)
     .maybeSingle()
   if (em) return NextResponse.json({ error: em.message }, { status: 500 })
-  if (!m || m.status !== 'active' || m.role !== 'admin') {
+  if (!m || m.status !== 'active') {
     return NextResponse.json({ error: 'Forbidden' }, { status: 403 })
   }
 
-  const { data, error } = await supabase
+  const isAdmin = m.role === 'admin'
+  const q = supabase
     .from('group_memberships')
-    .select('user_id,role,status,created_at,profiles:profiles(email,display_name)')
+    .select('user_id,role,status,created_at,profiles:profiles(email,display_name,avatar_path)')
     .eq('group_id', groupId)
-    .in('status', ['active', 'pending'])
+    .in('status', isAdmin ? ['active', 'pending'] : ['active'])
     .order('status', { ascending: false })
     .order('created_at', { ascending: true })
+  const { data, error } = await q
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 })
 
@@ -41,8 +43,10 @@ export async function GET(
     role: r.role as string,
     status: r.status as string,
     createdAt: r.created_at as string,
-    email: r.profiles?.email ?? null,
+    // Don't leak emails to non-admins.
+    email: isAdmin ? (r.profiles?.email ?? null) : null,
     displayName: r.profiles?.display_name ?? null,
+    avatarPath: r.profiles?.avatar_path ?? null,
   }))
 
   return NextResponse.json({ members })

@@ -9,12 +9,17 @@ create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   email text,
   display_name text,
+  avatar_path text,
   created_at timestamptz not null default now(),
   disabled_at timestamptz,
   disabled_reason text
 );
 
 alter table public.profiles enable row level security;
+
+-- If you applied an older schema already, ensure new columns exist:
+alter table public.profiles
+  add column if not exists avatar_path text;
 
 -- Users can read/update their own profile (email is copied from auth for convenience).
 create policy "profiles_select_own"
@@ -29,6 +34,72 @@ create policy "profiles_update_own"
 on public.profiles for update
 using (auth.uid() = id)
 with check (auth.uid() = id);
+
+-- STORAGE: user avatars (bucket: user-avatars)
+-- Object naming convention: "<userId>/avatar.webp"
+insert into storage.buckets (id, name, public)
+values ('user-avatars', 'user-avatars', false)
+on conflict (id) do nothing;
+
+-- Helper: check if two users share an active group membership.
+-- SECURITY DEFINER avoids RLS recursion issues when called from policies.
+create or replace function public.share_active_group(a uuid, b uuid)
+returns boolean
+language sql
+security definer
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.group_memberships m1
+    join public.group_memberships m2
+      on m2.group_id = m1.group_id
+    where m1.user_id = a
+      and m2.user_id = b
+      and m1.status = 'active'
+      and m2.status = 'active'
+  );
+$$;
+
+revoke all on function public.share_active_group(uuid, uuid) from public;
+grant execute on function public.share_active_group(uuid, uuid) to authenticated;
+
+-- Read: allow if you are the owner, OR if you share an active group with the avatar owner.
+create policy "user_avatars_read_owner_or_same_group"
+on storage.objects for select
+using (
+  bucket_id = 'user-avatars'
+  and (
+    auth.uid()::text = split_part(name, '/', 1)
+    or public.share_active_group(auth.uid(), split_part(name, '/', 1)::uuid)
+  )
+);
+
+-- Write: user can insert/update/delete only within their own "<userId>/" prefix.
+create policy "user_avatars_write_owner_insert"
+on storage.objects for insert
+with check (
+  bucket_id = 'user-avatars'
+  and auth.uid()::text = split_part(name, '/', 1)
+);
+
+create policy "user_avatars_write_owner_update"
+on storage.objects for update
+using (
+  bucket_id = 'user-avatars'
+  and auth.uid()::text = split_part(name, '/', 1)
+)
+with check (
+  bucket_id = 'user-avatars'
+  and auth.uid()::text = split_part(name, '/', 1)
+);
+
+create policy "user_avatars_write_owner_delete"
+on storage.objects for delete
+using (
+  bucket_id = 'user-avatars'
+  and auth.uid()::text = split_part(name, '/', 1)
+);
 
 -- GROUPS
 create table if not exists public.groups (
@@ -69,6 +140,7 @@ alter table public.group_memberships enable row level security;
 create policy "memberships_select_own"
 on public.group_memberships for select
 using (auth.uid() = user_id);
+
 
 -- RLS: allow creating a group if the user is not disabled.
 create policy "groups_insert_if_not_disabled"

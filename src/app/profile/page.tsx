@@ -16,6 +16,9 @@ export default function ProfilePage() {
 
   const [displayName, setDisplayName] = useState('')
   const [displayBusy, setDisplayBusy] = useState(false)
+  const [avatarPath, setAvatarPath] = useState<string | null>(null)
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null)
+  const [avatarBusy, setAvatarBusy] = useState(false)
   const [pw1, setPw1] = useState('')
   const [pw2, setPw2] = useState('')
   const [pwBusy, setPwBusy] = useState(false)
@@ -44,9 +47,12 @@ export default function ProfilePage() {
       if (!userId) return
       setError(null)
       try {
-        const { data, error } = await supabase.from('profiles').select('display_name').eq('id', userId).maybeSingle()
+        const { data, error } = await supabase.from('profiles').select('display_name,avatar_path').eq('id', userId).maybeSingle()
         if (error) throw error
-        if (!cancelled) setDisplayName(data?.display_name ?? '')
+        if (!cancelled) {
+          setDisplayName(data?.display_name ?? '')
+          setAvatarPath(data?.avatar_path ?? null)
+        }
       } catch {
         // ignore (schema might not be applied yet)
       }
@@ -56,6 +62,124 @@ export default function ProfilePage() {
       cancelled = true
     }
   }, [supabase, userId])
+
+  useEffect(() => {
+    let cancelled = false
+    async function loadAvatarUrl() {
+      setAvatarUrl(null)
+      if (!avatarPath) return
+      try {
+        const { data, error } = await supabase.storage.from('user-avatars').createSignedUrl(avatarPath, 60 * 60)
+        if (error) throw error
+        if (!cancelled) setAvatarUrl(data?.signedUrl ?? null)
+      } catch {
+        // ignore
+      }
+    }
+    loadAvatarUrl()
+    return () => {
+      cancelled = true
+    }
+  }, [avatarPath, supabase])
+
+  async function compressAvatarToWebp(file: File): Promise<Blob> {
+    const TARGET = 256
+
+    const dataUrl = await new Promise<string>((resolve, reject) => {
+      const r = new FileReader()
+      r.onerror = () => reject(new Error('Failed to read file'))
+      r.onload = () => resolve(String(r.result))
+      r.readAsDataURL(file)
+    })
+
+    const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+      const i = new Image()
+      i.onload = () => resolve(i)
+      i.onerror = () => reject(new Error('Failed to decode image'))
+      i.src = dataUrl
+    })
+
+    const canvas = document.createElement('canvas')
+    canvas.width = TARGET
+    canvas.height = TARGET
+    const ctx = canvas.getContext('2d')
+    if (!ctx) throw new Error('Canvas not supported')
+
+    const srcW = img.naturalWidth
+    const srcH = img.naturalHeight
+    const size = Math.min(srcW, srcH)
+    const sx = Math.round((srcW - size) / 2)
+    const sy = Math.round((srcH - size) / 2)
+
+    ctx.fillStyle = '#111827'
+    ctx.fillRect(0, 0, TARGET, TARGET)
+    ctx.drawImage(img, sx, sy, size, size, 0, 0, TARGET, TARGET)
+
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (b) => {
+          if (!b) reject(new Error('Failed to encode image'))
+          else resolve(b)
+        },
+        'image/webp',
+        0.82
+      )
+    })
+    return blob
+  }
+
+  async function uploadAvatar(file: File) {
+    if (!userId) return
+    setError(null)
+    setStatus(null)
+    setAvatarBusy(true)
+    try {
+      const blob = await compressAvatarToWebp(file)
+      const path = `${userId}/avatar.webp`
+
+      const { error: upErr } = await supabase.storage.from('user-avatars').upload(path, blob, {
+        upsert: true,
+        contentType: 'image/webp',
+      })
+      if (upErr) throw upErr
+
+      const { error: dbErr } = await supabase
+        .from('profiles')
+        .upsert({ id: userId, email: email ?? null, avatar_path: path })
+      if (dbErr) throw dbErr
+
+      setAvatarPath(path)
+      setStatus('Avatar updated.')
+    } catch (e: any) {
+      setError(e?.message ? String(e.message) : 'Failed to upload avatar')
+    } finally {
+      setAvatarBusy(false)
+    }
+  }
+
+  async function removeAvatar() {
+    if (!userId) return
+    const ok = confirm('Remove your avatar?')
+    if (!ok) return
+    setError(null)
+    setStatus(null)
+    setAvatarBusy(true)
+    try {
+      const path = avatarPath || `${userId}/avatar.webp`
+      await supabase.storage.from('user-avatars').remove([path])
+      const { error: dbErr } = await supabase
+        .from('profiles')
+        .upsert({ id: userId, email: email ?? null, avatar_path: null })
+      if (dbErr) throw dbErr
+      setAvatarPath(null)
+      setAvatarUrl(null)
+      setStatus('Avatar removed.')
+    } catch (e: any) {
+      setError(e?.message ? String(e.message) : 'Failed to remove avatar')
+    } finally {
+      setAvatarBusy(false)
+    }
+  }
 
   async function saveDisplayName() {
     if (!userId) return
@@ -142,6 +266,61 @@ export default function ProfilePage() {
         </div>
         <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
           <a href="/groups">Home</a>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 14, padding: 18 }}>
+        <div style={{ fontWeight: 700, color: '#111827' }}>Avatar</div>
+        <div style={{ color: '#6b7280', marginTop: 6 }}>A small profile photo shown to group members.</div>
+        <div style={{ marginTop: 12, display: 'flex', gap: 14, flexWrap: 'wrap', alignItems: 'center' }}>
+          <div
+            style={{
+              width: 64,
+              height: 64,
+              borderRadius: 999,
+              border: '1px solid #e5e7eb',
+              background: avatarUrl ? `url(${avatarUrl}) center/cover no-repeat` : '#111827',
+              color: '#fff',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontWeight: 700,
+            }}
+            aria-label="Avatar preview"
+          >
+            {!avatarUrl && (displayName.trim()[0] || email?.[0] || '?').toUpperCase()}
+          </div>
+
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+            <input
+              type="file"
+              accept="image/*"
+              disabled={avatarBusy || !userId}
+              onChange={async (e) => {
+                const f = e.target.files?.[0]
+                if (!f) return
+                await uploadAvatar(f)
+                e.target.value = ''
+              }}
+            />
+            <button
+              onClick={removeAvatar}
+              disabled={avatarBusy || !userId}
+              style={{
+                height: 40,
+                padding: '0 14px',
+                borderRadius: 10,
+                border: '1px solid #e5e7eb',
+                background: '#ffffff',
+                color: '#111827',
+                fontWeight: 700,
+                cursor: 'pointer',
+              }}
+            >
+              Remove
+            </button>
+            {avatarBusy && <span style={{ color: '#6b7280' }}>Working…</span>}
+          </div>
         </div>
       </div>
 
