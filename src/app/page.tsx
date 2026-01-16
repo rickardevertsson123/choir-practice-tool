@@ -1,7 +1,7 @@
 export default function HomePage() {
   return (
     <div style={{ padding: 16 }}>
-      <h1>Choir Practice Tool</h1>
+      <h1>ChoirUp</h1>
       <p>
         Play locally or log in to access groups.
       </p>

@@ -1417,7 +1417,7 @@ export default function ScorePlayerPage() {
     <div className="score-player-page">
       <header className="top-bar">
         <div className="top-bar__row">
-          <h1>Choir Practice Tool</h1>
+          <h1>ChoirUp</h1>
           <button type="button" className="top-bar__infoBtn" aria-label="About" title="About" onClick={() => setAboutOpen(true)}>
             ?
           </button>

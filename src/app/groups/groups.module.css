@@ -76,6 +76,9 @@
   color: #111827;
   font-weight: 700;
   cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
 }
 
 .btn:hover {

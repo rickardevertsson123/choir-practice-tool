@@ -192,6 +192,23 @@ export default function OwnerPage() {
                       >
                         {disabled ? 'Enable' : 'Disable'}
                       </button>
+                      <button
+                        className={styles.btn}
+                        style={{ marginLeft: 10, borderColor: 'rgba(239, 68, 68, 0.35)', background: 'rgba(239, 68, 68, 0.10)', color: '#991b1b' }}
+                        onClick={async () => {
+                          const ok = window.confirm(
+                            `Permanently delete user "${u.email ?? u.id}"?\n\nThis will remove them from all groups and delete any groups they created.`
+                          )
+                          if (!ok) return
+                          await apiPost(`/api/owner/users/${u.id}/delete`, {})
+                          await searchUsers()
+                          await refresh()
+                        }}
+                        disabled={!token}
+                        title="Permanently delete user"
+                      >
+                        Delete
+                      </button>
                     </td>
                   </tr>
                 )

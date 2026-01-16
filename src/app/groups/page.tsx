@@ -178,9 +178,14 @@ export default function GroupsPage() {
               Signed in as <span className={styles.muted}>{email ?? '—'}</span>
             </div>
           </div>
-          <button className={styles.btn} onClick={logout}>
-            Log out
-          </button>
+          <div className={styles.row}>
+            <a className={styles.btn} href="/profile">
+              Profile
+            </a>
+            <button className={styles.btn} onClick={logout}>
+              Log out
+            </button>
+          </div>
         </div>
 
         {status === 'needs_verification' ? (

@@ -15,7 +15,7 @@ export function AboutModal(props: { open: boolean; onClose: () => void }) {
   if (!open) return null
 
   return (
-    <div className="about-modal__backdrop" role="dialog" aria-modal="true" aria-label="About Choir Practice Tool" onClick={onClose}>
+    <div className="about-modal__backdrop" role="dialog" aria-modal="true" aria-label="About ChoirUp" onClick={onClose}>
       <div className="about-modal__panel" onClick={e => e.stopPropagation()}>
         <div className="about-modal__header">
           <div className="about-modal__title">About</div>
@@ -26,7 +26,7 @@ export function AboutModal(props: { open: boolean; onClose: () => void }) {
 
         <div className="about-modal__content">
           <p>
-            <strong>Choir Practice Tool</strong> helps you practice choir parts in your browser.
+            <strong>ChoirUp</strong> helps you practice choir parts in your browser.
           </p>
 
           <ul>

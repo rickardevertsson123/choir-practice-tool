@@ -28,6 +28,14 @@ export async function POST(request: Request) {
 
   const supabase = getSupabaseAdmin()
 
+  // Ensure profile row exists (group_memberships.user_id FK -> profiles.id).
+  // This is critical for brand-new users who sign up and go directly via a join link.
+  const { error: ep } = await supabase.from('profiles').upsert({
+    id: user.id,
+    email: user.email ?? null,
+  })
+  if (ep) return NextResponse.json({ error: ep.message }, { status: 500 })
+
   const tokenHash = await sha256Hex(token)
   const nowIso = new Date().toISOString()
 

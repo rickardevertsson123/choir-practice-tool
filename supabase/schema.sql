@@ -247,12 +247,19 @@ create table if not exists public.group_scores (
   group_id uuid not null references public.groups(id) on delete cascade,
   storage_path text not null,
   filename text not null,
+  display_name text,
+  expires_at timestamptz,
   content_type text,
   created_by uuid not null references public.profiles(id),
   created_at timestamptz not null default now()
 );
 
 alter table public.group_scores enable row level security;
+
+-- If you applied an older schema already, ensure new columns exist:
+alter table public.group_scores
+  add column if not exists display_name text,
+  add column if not exists expires_at timestamptz;
 
 -- Active members can list scores for their groups.
 create policy "group_scores_select_active_members"

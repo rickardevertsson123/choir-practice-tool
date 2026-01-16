@@ -44,18 +44,23 @@ export default function AuthClient() {
     setStatus(null)
 
     try {
+      const redirect = search?.get('redirect')
+      const joinToken = search?.get('joinToken')
+
       if (mode === 'signup') {
         if (DISABLE_SIGNUP) {
           setError('Sign up is disabled (closed beta).')
           setMode('login')
           return
         }
+        const redirectTo =
+          redirect && redirect.startsWith('/join/') ? `${window.location.origin}${redirect}` : `${window.location.origin}/groups`
         const { error: signUpErr } = await supabase.auth.signUp({
           email,
           password,
           options: {
             // Send users back to the site after email verification.
-            emailRedirectTo: `${window.location.origin}/groups`,
+            emailRedirectTo: redirectTo,
           },
         })
         if (signUpErr) throw signUpErr
@@ -84,7 +89,24 @@ export default function AuthClient() {
         // Ignore: schema might not be applied yet.
       }
 
-      router.replace('/groups')
+      // If this login came from a join link, auto-request membership.
+      if (joinToken) {
+        try {
+          const { data: s } = await supabase.auth.getSession()
+          const token = s.session?.access_token
+          if (token) {
+            await fetch('/api/join', {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+              body: JSON.stringify({ token: joinToken }),
+            })
+          }
+        } catch {
+          // Best-effort; user can still click Request membership on /join page.
+        }
+      }
+
+      router.replace(redirect || '/groups')
     } catch (err: any) {
       setError(err?.message ? String(err.message) : 'Unknown error')
     }

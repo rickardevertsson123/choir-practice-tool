@@ -40,6 +40,8 @@ type MemberRow = {
 type GroupScoreRow = {
   id: string
   filename: string
+  display_name: string | null
+  expires_at: string | null
   storage_path: string
   created_at: string
   created_by: string
@@ -58,6 +60,7 @@ export default function GroupPage() {
   const [inviteUrl, setInviteUrl] = useState<string | null>(null)
   const [inviteBusy, setInviteBusy] = useState(false)
   const [inviteError, setInviteError] = useState<string | null>(null)
+  const [inviteCopied, setInviteCopied] = useState(false)
   const [sessionToken, setSessionToken] = useState<string | null>(null)
   const [pending, setPending] = useState<PendingRequest[]>([])
   const [pendingLoading, setPendingLoading] = useState(false)
@@ -81,6 +84,8 @@ export default function GroupPage() {
   const [uploadBusy, setUploadBusy] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const [uploadAttest, setUploadAttest] = useState(false)
+  const [uploadExpiresAt, setUploadExpiresAt] = useState<string>('')
+  const [uploadDisplayName, setUploadDisplayName] = useState<string>('')
 
   useEffect(() => {
     let cancelled = false
@@ -183,7 +188,7 @@ export default function GroupPage() {
       try {
         const { data, error } = await supabase
           .from('group_scores')
-          .select('id,filename,storage_path,created_at,created_by')
+          .select('id,filename,display_name,expires_at,storage_path,created_at,created_by')
           .eq('group_id', groupId)
           .order('created_at', { ascending: false })
         if (error) throw error
@@ -371,9 +376,35 @@ export default function GroupPage() {
             <a className={styles.btn} href="/groups">
               Back to My groups
             </a>
-            <a className={`${styles.btn} ${styles.btnPrimary}`} href="/">
+            <a className={`${styles.btn} ${styles.btnPrimary}`} href="/groups">
               Home
             </a>
+            <a className={styles.btn} href="/profile">
+              Profile
+            </a>
+            <button
+              className={styles.btn}
+              onClick={async () => {
+                if (!sessionToken) return
+                const ok = confirm('Leave this group? You can request access again via an invite link.')
+                if (!ok) return
+                try {
+                  const r = await fetch(`/api/groups/${groupId}/leave`, {
+                    method: 'POST',
+                    headers: { Authorization: `Bearer ${sessionToken}` },
+                  })
+                  const j = await r.json().catch(() => ({}))
+                  if (!r.ok) throw new Error(j?.error || `HTTP ${r.status}`)
+                  router.replace('/groups')
+                } catch (e: any) {
+                  alert(e?.message ? String(e.message) : 'Failed to leave group')
+                }
+              }}
+              disabled={!sessionToken}
+              title="Leave group"
+            >
+              Leave group
+            </button>
           </div>
         </div>
 
@@ -512,10 +543,12 @@ export default function GroupPage() {
                         onClick={async () => {
                           try {
                             await navigator.clipboard.writeText(inviteUrl)
+                            setInviteCopied(true)
+                            window.setTimeout(() => setInviteCopied(false), 1200)
                           } catch {}
                         }}
                       >
-                        Copy
+                        {inviteCopied ? 'Copied' : 'Copy'}
                       </button>
                     </div>
                   </div>
@@ -818,6 +851,9 @@ export default function GroupPage() {
                 <div style={{ display: 'grid', gap: 10 }}>
                   {scores.map((s) => {
                     const url = scoreUrls[s.id]
+                    const title = (s.display_name || s.filename).trim()
+                    const expiresAt = s.expires_at ? new Date(s.expires_at) : null
+                    const expired = expiresAt ? Date.now() > expiresAt.getTime() : false
                     return (
                       <div
                         key={s.id}
@@ -834,18 +870,23 @@ export default function GroupPage() {
                         }}
                       >
                         <div>
-                          <div style={{ fontWeight: 700, color: '#111827' }}>{s.filename}</div>
+                          <div style={{ fontWeight: 700, color: '#111827' }}>{title}</div>
                           <div className={styles.muted} style={{ fontSize: 13 }}>
                             Uploaded: {new Date(s.created_at).toLocaleString()}
                           </div>
+                          {expiresAt && (
+                            <div className={styles.muted} style={{ fontSize: 13, marginTop: 4 }}>
+                              Expires: {expiresAt.toLocaleDateString()} {expired ? ' (expired)' : ''}
+                            </div>
+                          )}
                         </div>
                         <div className={styles.row}>
-                          {url ? (
+                          {url && !expired ? (
                             <a className={`${styles.btn} ${styles.btnPrimary}`} href={`/play?scoreUrl=${encodeURIComponent(url)}`}>
                               Play
                             </a>
                           ) : (
-                            <button className={styles.btn} disabled title="No signed URL yet">
+                            <button className={styles.btn} disabled title={expired ? 'Expired' : 'No signed URL yet'}>
                               Play
                             </button>
                           )}
@@ -853,7 +894,7 @@ export default function GroupPage() {
                             <button
                               className={styles.btn}
                               onClick={async () => {
-                                if (!confirm(`Delete "${s.filename}"? This will remove it for all group members.`)) return
+                                if (!confirm(`Delete "${title}"? This will remove it for all group members.`)) return
                                 setScoresError(null)
                                 try {
                                   const { error: dbErr } = await supabase.from('group_scores').delete().eq('id', s.id).eq('group_id', groupId)
@@ -889,6 +930,24 @@ export default function GroupPage() {
                   <div className={styles.muted} style={{ fontSize: 13, marginBottom: 8 }}>
                     Upload MXL / MusicXML (admins only)
                   </div>
+                  <div className={styles.row} style={{ marginBottom: 10 }}>
+                    <label className={styles.muted} style={{ fontSize: 13 }}>
+                      Expires
+                      <input
+                        type="date"
+                        value={uploadExpiresAt}
+                        onChange={(e) => setUploadExpiresAt(e.target.value)}
+                        style={{ marginLeft: 10, height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px' }}
+                      />
+                    </label>
+                    <input
+                      type="text"
+                      value={uploadDisplayName}
+                      onChange={(e) => setUploadDisplayName(e.target.value)}
+                      placeholder="Display name (optional)"
+                      style={{ height: 40, borderRadius: 10, border: '1px solid #d1d5db', padding: '0 12px', minWidth: 260 }}
+                    />
+                  </div>
                   <label className={styles.muted} style={{ display: 'block', fontSize: 13, lineHeight: 1.35, marginBottom: 10 }}>
                     <input
                       type="checkbox"
@@ -902,11 +961,16 @@ export default function GroupPage() {
                     <input
                       type="file"
                       accept=".mxl,.xml,.musicxml,application/vnd.recordare.musicxml+xml,application/xml,text/xml"
-                      disabled={uploadBusy || !uploadAttest}
+                      disabled={uploadBusy || !uploadAttest || !uploadExpiresAt}
                       onChange={async (e) => {
                         setUploadError(null)
                         const f = e.target.files?.[0]
                         if (!f) return
+                        if (!uploadExpiresAt) {
+                          setUploadError('Please set an expiry date first.')
+                          e.target.value = ''
+                          return
+                        }
                         if (!uploadAttest) {
                           setUploadError('Please confirm the rights/permissions checkbox first.')
                           e.target.value = ''
@@ -915,6 +979,7 @@ export default function GroupPage() {
                         setUploadBusy(true)
                         try {
                           const safe = sanitizeFilename(f.name || 'score.mxl')
+                          const displayName = (uploadDisplayName || safe).trim()
                           const ext = safe.toLowerCase().endsWith('.mxl')
                             ? 'mxl'
                             : safe.toLowerCase().endsWith('.musicxml')
@@ -932,10 +997,13 @@ export default function GroupPage() {
                           const userId = sessionData.session?.user?.id
                           if (!userId) throw new Error('Not logged in')
 
+                          const expiresIso = new Date(`${uploadExpiresAt}T23:59:59`).toISOString()
                           const { error: dbErr } = await supabase.from('group_scores').insert({
                             group_id: groupId,
                             storage_path: path,
                             filename: safe,
+                            display_name: displayName,
+                            expires_at: expiresIso,
                             content_type: f.type || null,
                             created_by: userId,
                           })
@@ -944,7 +1012,7 @@ export default function GroupPage() {
                           // Refresh list
                           const { data, error } = await supabase
                             .from('group_scores')
-                            .select('id,filename,storage_path,created_at,created_by')
+                            .select('id,filename,display_name,expires_at,storage_path,created_at,created_by')
                             .eq('group_id', groupId)
                             .order('created_at', { ascending: false })
                           if (error) throw error
@@ -970,7 +1038,8 @@ export default function GroupPage() {
                       }}
                     />
                     {uploadBusy && <span className={styles.muted}>Uploading…</span>}
-                    {!uploadBusy && !uploadAttest && <span className={styles.muted}>Confirm rights to enable upload.</span>}
+                    {!uploadBusy && !uploadExpiresAt && <span className={styles.muted}>Set expiry date to enable upload.</span>}
+                    {!uploadBusy && uploadExpiresAt && !uploadAttest && <span className={styles.muted}>Confirm rights to enable upload.</span>}
                   </div>
                   {uploadError && <div style={{ marginTop: 10, color: '#991b1b', fontWeight: 700 }}>{uploadError}</div>}
                 </div>
