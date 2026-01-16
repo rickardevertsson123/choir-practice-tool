@@ -22,9 +22,8 @@ import { frequencyToNoteInfo, PitchResult, resetPitchDetectorState } from '../au
 import { calibrateLatency, calibrateLatencyHeadphones } from '../audio/latencyCalibration'
 import { PerfOverlay, PerfSnapshot } from './scorePlayerPage/PerfOverlay'
 import { PitchDetectorOverlay } from './scorePlayerPage/PitchDetectorOverlay'
-import { TunerPanel } from './scorePlayerPage/TunerPanel'
 import { LatencyControl } from './scorePlayerPage/LatencyControl'
-import { TransportBar } from './scorePlayerPage/TransportBar'
+import { BottomIconBar } from './scorePlayerPage/BottomIconBar'
 import { AboutModal } from './scorePlayerPage/AboutModal'
 
 const PITCH_WORKLET_URL = '/worklets/pitchDetector.worklet.js'
@@ -211,6 +210,8 @@ export default function ScorePlayerPage() {
 
   const [difficulty, setDifficulty] = useState<Difficulty>('normal');
   const [aboutOpen, setAboutOpen] = useState(false)
+  type ActivePanel = 'none' | 'voice' | 'mixer' | 'settings'
+  const [activePanel, setActivePanel] = useState<ActivePanel>('none')
 
   // Avoid unnecessary rerenders from the detect loop by only committing
   // user-visible changes (rounded values) to React state.
@@ -223,6 +224,10 @@ export default function ScorePlayerPage() {
   useEffect(() => {
     pitchSettingsRef.current = DIFFICULTY_PRESETS[difficulty];
   }, [difficulty]);
+
+  useEffect(() => {
+    if (!scoreTimeline) setActivePanel('none')
+  }, [scoreTimeline])
   /* =========================
      SYNC REFS
   ========================= */
@@ -665,6 +670,17 @@ export default function ScorePlayerPage() {
       [voice]: { ...prev[voice], ...settings }
     }))
     playerRef.current?.setVoiceSettings(voice, settings)
+  }
+
+  async function activateMicForVoice(voice: VoiceId) {
+    // Ensure the selected voice is available to the mic/worklet handler immediately.
+    selectedVoiceRef.current = voice
+    setSelectedVoice(voice)
+
+    setActivePanel('none')
+    if (!micActive) {
+      await handleMicToggle()
+    }
   }
 
   /* =========================
@@ -1470,7 +1486,9 @@ export default function ScorePlayerPage() {
           </div>
 
           <div ref={scoreContainerRef} id="score-container" className="score-container">
-            <div ref={osmdContainerRef} className="osmd-container" />
+            <div className="osmd-wrapper">
+              <div ref={osmdContainerRef} className="osmd-container" />
+            </div>
             {!scoreTimeline && <p>Select a MusicXML or MXL file to display notes</p>}
 
             {scoreTimeline && (
@@ -1491,154 +1509,226 @@ export default function ScorePlayerPage() {
               </>
             )}
           </div>
-
-          {scoreTimeline && (
-            <TransportBar
-              isPlaying={isPlaying}
-              currentTime={currentTime}
-              duration={scoreTimeline.totalDurationSeconds}
-              onPlayPause={handlePlayPause}
-              onStop={handleStop}
-              onSeek={(t) => {
-                // Keep behavior identical to the old slider handler.
-                setCurrentTime(t)
-                resetPitchEvaluationState()
-                playerRef.current?.seekTo(t)
-              }}
-            />
-          )}
         </div>
-
-        <aside className="control-panel">
-          <h3>Controls</h3>
-
-          {scoreTimeline && (
-            <>
-              <div className="voice-selection">
-                <h4>🎤 Select voice to practice</h4>
-                <select value={selectedVoice || ''} onChange={e => setSelectedVoice(e.target.value as VoiceId)}>
-                  {!selectedVoice && <option value="">Select voice...</option>}
-                  {voicesHuman.map(v => (
-                    <option key={v} value={v}>
-                      {buildVoiceDisplayLabel(v, getVoices(), partMetadata)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <label>
-                Difficulty:&nbsp;
-                <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
-                  <option value="normal">Normal</option>
-                  <option value="advanced">Advanced</option>
-                  <option value="expert">Expert</option>
-                </select>
-              </label>
-
-              <TunerPanel micActive={micActive} isPlaying={isPlaying} pitchResult={pitchResult} onMicToggle={handleMicToggle} />
-
-              <LatencyControl
-                micActive={micActive}
-                latencyMs={latencyMs}
-                setLatencyMs={setLatencyMs}
-                calibrating={calibrating}
-                calibrationMessage={calibrationMessage}
-                onCalibrateSpeakers={async () => {
-                  if (calibrating) return
-                  setCalibrating(true)
-                  setCalibrationMessage('Put mic on speaker. Sound latency is about to start')
-                  try {
-                    const ms = await calibrateLatency({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, durationMs: 6000 })
-                    setLatencyMs(Math.round(ms))
-                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
-                  } catch (err: any) {
-                    console.error(err)
-                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
-                  } finally {
-                    setCalibrating(false)
-                    setTimeout(() => setCalibrationMessage(null), 3000)
-                  }
-                }}
-                onCalibrateHeadphones={async () => {
-                  if (calibrating) return
-                  setCalibrating(true)
-                  setCalibrationMessage("Headphones: listen to the metronome and say 'ta' every time you hear a tick")
-                  try {
-                    const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
-                    setLatencyMs(Math.round(ms))
-                    setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
-                  } catch (err: any) {
-                    console.error(err)
-                    setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
-                  } finally {
-                    setCalibrating(false)
-                    setTimeout(() => setCalibrationMessage(null), 3000)
-                  }
-                }}
-              />
-
-              <div className="tempo-control" style={{ marginTop: 16 }}>
-                <h4>🎵 Tempo</h4>
-                <div className="tempo-display">
-                  {Math.round(scoreTimeline.tempoBpm * tempoMultiplier)} BPM
-                  <span className="tempo-original"> ({scoreTimeline.tempoBpm} BPM original)</span>
-                </div>
-                <div className="tempo-buttons">
-                  {[0.5, 0.75, 1.0, 1.25, 1.5].map(m => (
-                    <button
-                      key={m}
-                      onClick={() => handleTempoChange(m)}
-                      className={tempoMultiplier === m ? 'active' : ''}
-                    >
-                      {m}x
-                    </button>
-                  ))}
-                </div>
-                <input
-                  type="range"
-                  min={0.25}
-                  max={2.0}
-                  step={0.05}
-                  value={tempoMultiplier}
-                  onChange={e => handleTempoChange(parseFloat(e.target.value))}
-                  className="tempo-slider"
-                />
-              </div>
-
-              <div className="voice-mixer" style={{ marginTop: 16 }}>
-                <h4>Voices</h4>
-                {getVoices().map(v => {
-                  const settings = getVoiceSettings(v)
-                  const label = buildVoiceDisplayLabel(v, getVoices(), partMetadata)
-                  return (
-                    <div key={v} className="mixer-voice-row">
-                      <div className="mixer-voice-name">{label}</div>
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={settings.volume * 100}
-                        onChange={e => handleVoiceSettingsChange(v, { volume: parseInt(e.target.value) / 100 })}
-                      />
-                      <button
-                        onClick={() => handleVoiceSettingsChange(v, { muted: !settings.muted })}
-                        className={settings.muted ? 'active' : ''}
-                      >
-                        {settings.muted ? '🔇' : '🔊'}
-                      </button>
-                      <button
-                        onClick={() => handleVoiceSettingsChange(v, { solo: !settings.solo })}
-                        className={settings.solo ? 'active' : ''}
-                      >
-                        S
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            </>
-          )}
-        </aside>
       </main>
+
+      {/* Bottom icon bar + overlays (shown only when a score is loaded) */}
+      {scoreTimeline && (
+        <>
+          <BottomIconBar
+            isPlaying={isPlaying}
+            micActive={micActive}
+            activePanel={activePanel}
+            currentTime={currentTime}
+            duration={scoreTimeline.totalDurationSeconds}
+            onSeek={(t) => {
+              setCurrentTime(t)
+              resetPitchEvaluationState()
+              playerRef.current?.seekTo(t)
+            }}
+            onPlayPause={handlePlayPause}
+            onStop={handleStop}
+            onMicClick={() => {
+              if (micActive) {
+                stopMic()
+                setActivePanel('none')
+              } else {
+                setActivePanel(p => (p === 'voice' ? 'none' : 'voice'))
+              }
+            }}
+            onVolumeClick={() => setActivePanel(p => (p === 'mixer' ? 'none' : 'mixer'))}
+            onSettingsClick={() => setActivePanel(p => (p === 'settings' ? 'none' : 'settings'))}
+          />
+
+          {/* Voice selection overlay (choose voice first, then activate mic) */}
+          {activePanel === 'voice' && (
+            <div className="score-overlay-backdrop" role="dialog" aria-label="Select voice" onClick={() => setActivePanel('none')}>
+              <div className="score-overlay-voice" onClick={(e) => e.stopPropagation()}>
+                <div className="score-overlay-voice__title">Choose voice to practice</div>
+                <div className="voice-circle-menu">
+                  <button type="button" className="voice-circle-cancel" aria-label="Cancel" title="Cancel" onClick={() => setActivePanel('none')}>
+                    ✕
+                  </button>
+                  {voicesHuman.map((v, i) => {
+                    const n = Math.max(1, voicesHuman.length)
+                    const angle = (Math.PI * 2 * i) / n - Math.PI / 2
+                    const radius = n <= 2 ? 150 : 170
+                    const dx = Math.round(Math.cos(angle) * radius)
+                    const dy = Math.round(Math.sin(angle) * radius)
+                    const label = buildVoiceDisplayLabel(v, getVoices(), partMetadata)
+                    const isSelected = selectedVoice === v
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        className={`voice-circle-item${isSelected ? ' is-selected' : ''}`}
+                        style={{ ['--dx' as any]: `${dx}px`, ['--dy' as any]: `${dy}px` }}
+                        onClick={() => activateMicForVoice(v)}
+                      >
+                        {label}
+                      </button>
+                    )
+                  })}
+                </div>
+
+                <div className="score-overlay-voice__footer">
+                  <label className="score-overlay-field">
+                    Difficulty&nbsp;
+                    <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
+                      <option value="normal">Normal</option>
+                      <option value="advanced">Advanced</option>
+                      <option value="expert">Expert</option>
+                    </select>
+                  </label>
+                  <button type="button" className="score-overlay-closeBtn" onClick={() => setActivePanel('none')}>
+                    Close
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Mixer overlay */}
+          {activePanel === 'mixer' && (
+            <div className="score-overlay-backdrop" role="dialog" aria-label="Volume mixer" onClick={() => setActivePanel('none')}>
+              <div className="score-overlay-panel" onClick={(e) => e.stopPropagation()}>
+                <div className="score-overlay-panel__header">
+                  <div className="score-overlay-panel__title">Volume</div>
+                  <button type="button" className="score-overlay-closeBtn" onClick={() => setActivePanel('none')}>
+                    ✕
+                  </button>
+                </div>
+
+                <div className="voice-mixer">
+                  {getVoices().map(v => {
+                    const settings = getVoiceSettings(v)
+                    const label = buildVoiceDisplayLabel(v, getVoices(), partMetadata)
+                    return (
+                      <div key={v} className="mixer-voice-row">
+                        <div className="mixer-voice-name">{label}</div>
+                        <input
+                          type="range"
+                          min={0}
+                          max={100}
+                          value={settings.volume * 100}
+                          onChange={e => handleVoiceSettingsChange(v, { volume: parseInt(e.target.value) / 100 })}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => handleVoiceSettingsChange(v, { muted: !settings.muted })}
+                          className={settings.muted ? 'active' : ''}
+                          aria-label={settings.muted ? 'Unmute' : 'Mute'}
+                          title={settings.muted ? 'Unmute' : 'Mute'}
+                        >
+                          {settings.muted ? '🔇' : '🔊'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleVoiceSettingsChange(v, { solo: !settings.solo })}
+                          className={settings.solo ? 'active' : ''}
+                          aria-label={settings.solo ? 'Disable solo' : 'Solo'}
+                          title={settings.solo ? 'Disable solo' : 'Solo'}
+                        >
+                          S
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Settings overlay */}
+          {activePanel === 'settings' && (
+            <div className="score-overlay-backdrop" role="dialog" aria-label="Settings" onClick={() => setActivePanel('none')}>
+              <div className="score-overlay-panel" onClick={(e) => e.stopPropagation()}>
+                <div className="score-overlay-panel__header">
+                  <div className="score-overlay-panel__title">Settings</div>
+                  <button type="button" className="score-overlay-closeBtn" onClick={() => setActivePanel('none')}>
+                    ✕
+                  </button>
+                </div>
+
+                <label className="score-overlay-field">
+                  Difficulty&nbsp;
+                  <select value={difficulty} onChange={(e) => setDifficulty(e.target.value as Difficulty)}>
+                    <option value="normal">Normal</option>
+                    <option value="advanced">Advanced</option>
+                    <option value="expert">Expert</option>
+                  </select>
+                </label>
+
+                <div className="tempo-control" style={{ marginTop: 12 }}>
+                  <h4>Tempo</h4>
+                  <div className="tempo-display">
+                    {Math.round(scoreTimeline.tempoBpm * tempoMultiplier)} BPM
+                    <span className="tempo-original"> ({scoreTimeline.tempoBpm} BPM original)</span>
+                  </div>
+                  <div className="tempo-buttons">
+                    {[0.5, 0.75, 1.0, 1.25, 1.5].map(m => (
+                      <button key={m} type="button" onClick={() => handleTempoChange(m)} className={tempoMultiplier === m ? 'active' : ''}>
+                        {m}x
+                      </button>
+                    ))}
+                  </div>
+                  <input
+                    type="range"
+                    min={0.25}
+                    max={2.0}
+                    step={0.05}
+                    value={tempoMultiplier}
+                    onChange={e => handleTempoChange(parseFloat(e.target.value))}
+                    className="tempo-slider"
+                  />
+                </div>
+
+                <div style={{ marginTop: 12 }}>
+                  <LatencyControl
+                    micActive={micActive}
+                    latencyMs={latencyMs}
+                    setLatencyMs={setLatencyMs}
+                    calibrating={calibrating}
+                    calibrationMessage={calibrationMessage}
+                    onCalibrateSpeakers={async () => {
+                      if (calibrating) return
+                      setCalibrating(true)
+                      setCalibrationMessage('Put mic on speaker. Sound latency is about to start')
+                      try {
+                        const ms = await calibrateLatency({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, durationMs: 6000 })
+                        setLatencyMs(Math.round(ms))
+                        setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                      } catch (err: any) {
+                        console.error(err)
+                        setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                      } finally {
+                        setCalibrating(false)
+                        setTimeout(() => setCalibrationMessage(null), 3000)
+                      }
+                    }}
+                    onCalibrateHeadphones={async () => {
+                      if (calibrating) return
+                      setCalibrating(true)
+                      setCalibrationMessage("Headphones: listen to the metronome and say 'ta' every time you hear a tick")
+                      try {
+                        const ms = await calibrateLatencyHeadphones({ audioContext: audioContextRef.current, existingStream: micStreamRef.current, intervalMs: 800, clicks: 8 })
+                        setLatencyMs(Math.round(ms))
+                        setCalibrationMessage(`Calibration complete: ${Math.round(ms)} ms`)
+                      } catch (err: any) {
+                        console.error(err)
+                        setCalibrationMessage('Calibration failed: ' + (err?.message ?? 'Unknown error'))
+                      } finally {
+                        setCalibrating(false)
+                        setTimeout(() => setCalibrationMessage(null), 3000)
+                      }
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+          )}
+        </>
+      )}
 
       <AboutModal open={aboutOpen} onClose={() => setAboutOpen(false)} />
     </div>
