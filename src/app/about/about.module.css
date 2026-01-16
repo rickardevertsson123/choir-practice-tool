@@ -1,0 +1,116 @@
+.page {
+  max-width: 980px;
+  margin: 40px auto;
+  padding: 16px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 22px;
+  font-weight: 700;
+  color: #f9fafb;
+}
+
+.titleLogo {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.nav {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.nav a {
+  color: #e5e7eb;
+  text-decoration: none;
+}
+
+.nav a:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.card {
+  margin-top: 16px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 16px;
+  padding: 18px;
+  color: #111827;
+  position: relative;
+  overflow: hidden;
+}
+
+.card::before {
+  content: "";
+  position: absolute;
+  inset: -40px -40px -40px -40px;
+  background-image: url('/logo.png');
+  background-repeat: no-repeat;
+  background-position: 95% 10%;
+  background-size: 260px;
+  opacity: 0.06;
+  pointer-events: none;
+}
+
+.content {
+  position: relative;
+  z-index: 1;
+}
+
+.markdown {
+  line-height: 1.65;
+}
+
+.markdown :global(h1),
+.markdown :global(h2),
+.markdown :global(h3) {
+  margin: 18px 0 10px 0;
+  line-height: 1.2;
+}
+
+.markdown :global(h1) {
+  font-size: 26px;
+}
+
+.markdown :global(h2) {
+  font-size: 18px;
+}
+
+.markdown :global(p) {
+  margin: 12px 0;
+}
+
+.markdown :global(ul),
+.markdown :global(ol) {
+  margin: 10px 0 14px;
+  padding-left: 1.25rem; /* keep bullets inside the card */
+}
+
+.markdown :global(li) {
+  margin: 6px 0;
+}
+
+.markdown :global(a) {
+  color: #111827;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+
