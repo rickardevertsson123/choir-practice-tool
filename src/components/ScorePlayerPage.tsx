@@ -90,6 +90,7 @@ export default function ScorePlayerPage() {
   const scoreContainerRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null)
+  const osmdWrapperRef = useRef<HTMLDivElement | null>(null)
   const osmdContainerRef = useRef<HTMLDivElement | null>(null)
 
   const trailCanvasRef = useRef<HTMLCanvasElement>(null)
@@ -212,6 +213,8 @@ export default function ScorePlayerPage() {
   const [aboutOpen, setAboutOpen] = useState(false)
   type ActivePanel = 'none' | 'voice' | 'mixer' | 'settings'
   const [activePanel, setActivePanel] = useState<ActivePanel>('none')
+  const [osmdZoom, setOsmdZoom] = useState(1)
+  const lastAppliedZoomRef = useRef<number>(1)
 
   // Avoid unnecessary rerenders from the detect loop by only committing
   // user-visible changes (rounded values) to React state.
@@ -228,6 +231,44 @@ export default function ScorePlayerPage() {
   useEffect(() => {
     if (!scoreTimeline) setActivePanel('none')
   }, [scoreTimeline])
+
+  function computeDesiredZoom(availableWidthPx: number): number {
+    // A4-ish score wrapper width (matches CSS max width). We treat this as "1.0x".
+    const BASE_PAGE_WIDTH_PX = 820
+    // Slightly zoomed-out by default so more measures fit per system.
+    const DESKTOP_BASE_ZOOM = 0.88
+    // Don't let it get too small.
+    const MIN_ZOOM = 0.55
+    const MAX_ZOOM = 1.0
+    const fit = availableWidthPx > 0 ? Math.min(1, availableWidthPx / BASE_PAGE_WIDTH_PX) : 1
+    return clamp(DESKTOP_BASE_ZOOM * fit, MIN_ZOOM, MAX_ZOOM)
+  }
+
+  async function applyOsmdZoomIfNeeded() {
+    const osmd = osmdRef.current
+    const wrapper = osmdWrapperRef.current
+    if (!osmd || !wrapper) return
+    const w = wrapper.clientWidth
+    const nextZoom = computeDesiredZoom(w)
+    const prev = lastAppliedZoomRef.current
+    if (Math.abs(nextZoom - prev) < 0.01) return
+
+    try {
+      // OSMD 1.9.x uses a Zoom property, not setZoom().
+      if (typeof (osmd as any).Zoom !== 'undefined') {
+        ;(osmd as any).Zoom = nextZoom
+      } else {
+        ;(osmd as any).zoom = nextZoom
+      }
+      osmd.render()
+      lastAppliedZoomRef.current = nextZoom
+      setOsmdZoom(nextZoom)
+      // Zoom affects cursor geometry, so rebuild position cache.
+      await buildPositionCache()
+    } catch (e) {
+      console.warn('[osmd] failed to apply zoom', e)
+    }
+  }
   /* =========================
      SYNC REFS
   ========================= */
@@ -277,7 +318,7 @@ export default function ScorePlayerPage() {
     canvas.height = Math.max(1, container.scrollHeight || container.clientHeight || 1)
 
     trailCtxRef.current = canvas.getContext('2d')
-  }, [scoreTimeline])
+  }, [scoreTimeline, osmdZoom])
 
   function clearTrail() {
     const ctx = trailCtxRef.current
@@ -346,6 +387,8 @@ export default function ScorePlayerPage() {
     if (!osmdRef.current) throw new Error('OSMD saknas')
     await osmdRef.current.load(xmlContent)
     await osmdRef.current.render()
+    // After first render we can compute responsive zoom and re-render.
+    await applyOsmdZoomIfNeeded()
 
     osmdRef.current.cursor.show()
     osmdRef.current.cursor.reset()
@@ -1369,6 +1412,26 @@ export default function ScorePlayerPage() {
     return () => cancelAnimationFrame(raf)
   }, [scoreTimeline])
 
+  // Keep OSMD zoom responsive to viewport changes (desktop and mobile orientation).
+  useEffect(() => {
+    if (!scoreTimeline) return
+    let raf = 0
+    const onResize = () => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        applyOsmdZoomIfNeeded()
+      })
+    }
+    window.addEventListener('resize', onResize)
+    // Run once after mount / score load
+    onResize()
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('resize', onResize)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scoreTimeline])
+
   function resetPitchEvaluationState() {
     // Intentionally minimal for "raw pitchy" evaluation.
   }
@@ -1431,7 +1494,7 @@ export default function ScorePlayerPage() {
   const voicesHuman = getVoices().filter(v => !v.toLowerCase().includes('keyboard'))
 
   return (
-    <div className="score-player-page">
+    <div className={`score-player-page${scoreTimeline ? ' has-score' : ''}`}>
       <header className="top-bar">
         <div className="top-bar__row">
           <div className="top-bar__left">
@@ -1487,7 +1550,9 @@ export default function ScorePlayerPage() {
 
           <div ref={scoreContainerRef} id="score-container" className="score-container">
             <div className="osmd-wrapper">
-              <div ref={osmdContainerRef} className="osmd-container" />
+              <div ref={osmdWrapperRef} className="osmd-wrapper__inner">
+                <div ref={osmdContainerRef} className="osmd-container" />
+              </div>
             </div>
             {!scoreTimeline && <p>Select a MusicXML or MXL file to display notes</p>}
 
