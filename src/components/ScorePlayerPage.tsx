@@ -117,6 +117,7 @@ export default function ScorePlayerPage() {
   ========================= */
   const audioContextRef = useRef<AudioContext | null>(null)
   const micStreamRef = useRef<MediaStream | null>(null)
+  const micSourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const pitchWorkletNodeRef = useRef<AudioWorkletNode | null>(null)
   const pitchWorkletTapGainRef = useRef<GainNode | null>(null)
   const useWorkletRef = useRef(false)
@@ -923,8 +924,18 @@ export default function ScorePlayerPage() {
 
       if (!audioContextRef.current) audioContextRef.current = new AudioContext()
 
-      const source = audioContextRef.current.createMediaStreamSource(stream)
       const ctx = audioContextRef.current
+      // Ensure the context is running (some browsers start in suspended state).
+      try { if (ctx.state === 'suspended') await ctx.resume() } catch {}
+
+      // If we somehow still have a previous mic graph, tear it down first.
+      // (Prevents accumulating nodes across mic off/on toggles.)
+      if (micSourceNodeRef.current || pitchWorkletNodeRef.current || pitchWorkletTapGainRef.current) {
+        stopMic()
+      }
+
+      const source = ctx.createMediaStreamSource(stream)
+      micSourceNodeRef.current = source
 
       // CRITICAL: keep playback and mic/worklet on the same AudioContext clock.
       // If ScorePlayer was created before the mic (audioContextRef.current was null),
@@ -978,7 +989,9 @@ export default function ScorePlayerPage() {
 
         // Ensure the node is "pulled" by the graph but keep it silent.
         const tap = ctx.createGain()
-        tap.gain.value = 0
+        // Some browsers may optimize away truly silent subgraphs; keep it effectively silent
+        // but non-zero so the worklet stays pulled.
+        tap.gain.value = 0.0001
 
         source.connect(node)
         node.connect(tap)
@@ -996,6 +1009,30 @@ export default function ScorePlayerPage() {
 
       setPitchResult({ frequency: null, clarity: 0 })
       setDistanceCents(null)
+      lastEmittedPitchRef.current = null
+      lastEmittedDistanceRoundedRef.current = null
+
+      // Reset transition/trail gating for a fresh mic session.
+      // Otherwise we can get stuck in a state that prevents drawing the error trail
+      // after toggling mic off -> on.
+      transitionRef.current.lastExactMidi = null
+      transitionRef.current.inTransition = false
+      trailConfirmRef.current.count = 0
+      trailConfirmRef.current.confirmed = false
+      trailConfirmRef.current.lastKind = null
+      lastTrailDrawMsRef.current = 0
+      lastTrailXRef.current = null
+
+      // Reset per-voice indices used for allowed-window checks so the very first
+      // frames after re-enable don't behave oddly.
+      try {
+        const map = notesByVoiceRef.current
+        const idxMap: Record<string, number> = {}
+        if (map) {
+          for (const k of Object.keys(map)) idxMap[k] = 0
+        }
+        notesIndexByVoiceRef.current = idxMap
+      } catch {}
 
       // reset pitch detection internal gate too
       resetPitchDetectorState()
@@ -1436,11 +1473,18 @@ export default function ScorePlayerPage() {
     lastEmittedDistanceRoundedRef.current = null
 
     // Worklet cleanup
+    try {
+      if (pitchWorkletNodeRef.current) pitchWorkletNodeRef.current.port.onmessage = null as any
+    } catch {}
     try { pitchWorkletNodeRef.current?.disconnect() } catch {}
     try { pitchWorkletTapGainRef.current?.disconnect() } catch {}
     pitchWorkletNodeRef.current = null
     pitchWorkletTapGainRef.current = null
     useWorkletRef.current = false
+
+    // Disconnect mic source node (otherwise nodes can accumulate across toggles).
+    try { micSourceNodeRef.current?.disconnect() } catch {}
+    micSourceNodeRef.current = null
 
     micStreamRef.current?.getTracks().forEach(t => t.stop())
     micStreamRef.current = null
