@@ -243,7 +243,7 @@ export default function ScorePlayerPage() {
     // Slightly zoomed-out by default so more measures fit per system.
     const DESKTOP_BASE_ZOOM = 0.88
     // Don't let it get too small.
-    const MIN_ZOOM = 0.55
+    const MIN_ZOOM = 0.40
     const MAX_ZOOM = 1.05
     const fitW = availableWidthPx > 0 ? Math.min(1, availableWidthPx / BASE_PAGE_WIDTH_PX) : 1
     // Only fit height on short screens (e.g. mobile landscape). On desktop this can
@@ -316,6 +316,52 @@ export default function ScorePlayerPage() {
       setOsmdZoom(nextZoom)
       // Zoom affects cursor geometry, so rebuild position cache.
       await buildPositionCache()
+
+      // Extra safety pass: ensure at least the current system + lyrics padding fits in height.
+      // This primarily targets small screens in landscape where the user must see both notes and text.
+      if (container && cursorPositionsRef.current.length > 0 && cursorStepsRef.current.length > 0) {
+        const viewH = container.clientHeight
+        // Bottom icon bar visually covers some of the score container.
+        const reservedBottom = 96
+        const visibleH = Math.max(120, viewH - reservedBottom)
+
+        // Approximate current step index from current playback time.
+        const player = playerRef.current
+        const timeline = timelineRef.current
+        if (player && timeline) {
+          const tNow = player.getCurrentTime()
+          let musicalTime = (tNow * timeline.tempoBpm) / 240
+          const steps = cursorStepsRef.current
+          const lastIdx = steps.length - 1
+          const maxMusicalTime = steps[lastIdx]?.musicalTime ?? 0
+          musicalTime = Math.max(0, Math.min(musicalTime, maxMusicalTime))
+          let i = 0
+          while (i < lastIdx && steps[i + 1].musicalTime <= musicalTime) i++
+          while (i > 0 && steps[i].musicalTime > musicalTime) i--
+          const pos = cursorPositionsRef.current[i]
+          if (pos) {
+            const extraBelow = viewH < 520 ? 190 : 140
+            const extraAbove = 40
+            const needed = pos.height + extraAbove + extraBelow
+            if (needed > visibleH + 8) {
+              const factor = clamp(visibleH / needed, 0.2, 1.0)
+              const adjustedZoom = clamp(nextZoom * factor, 0.40, nextZoom)
+              if (adjustedZoom < nextZoom - 0.01) {
+                if (typeof (osmd as any).Zoom !== 'undefined') {
+                  ;(osmd as any).Zoom = adjustedZoom
+                } else {
+                  ;(osmd as any).zoom = adjustedZoom
+                }
+                osmd.render()
+                lastAppliedZoomRef.current = adjustedZoom
+                setOsmdZoom(adjustedZoom)
+                await buildPositionCache()
+              }
+            }
+          }
+        }
+      }
+
       // Keep playhead aligned even when paused.
       updatePlayheadAtCurrentTime()
     } catch (e) {
@@ -1470,6 +1516,10 @@ export default function ScorePlayerPage() {
         const pos = cursorPositionsRef.current[currentStepIndex]
         const scrollTop = container.scrollTop
         const viewH = container.clientHeight
+        // Bottom icon bar overlays the score container (fixed positioned), so treat that
+        // space as unavailable when deciding whether lyrics/system fits.
+        const reservedBottom = 96
+        const effectiveViewH = Math.max(120, viewH - reservedBottom)
 
         const bottomMargin = 140
         const topMargin = 80
@@ -1478,11 +1528,22 @@ export default function ScorePlayerPage() {
         const extraBelow = viewH < 520 ? 170 : 130
         const neededBottom = pos.top + pos.height + extraBelow
 
-        // Keep the current system fully visible (including text), and don't wait until it's too late.
-        if (neededBottom > scrollTop + viewH - bottomMargin) {
-          scrollTargetTop = neededBottom - (viewH - bottomMargin)
+        // Keep the current system readable:
+        // - try to keep the top of the system visible
+        // - try to keep the lyrics/text below visible
+        const minScrollTop = pos.top - topMargin
+        const maxScrollTop = neededBottom - (effectiveViewH - bottomMargin)
+
+        // If the system (incl. text) is taller than the available height, maxScrollTop can be < minScrollTop.
+        // In that case, prefer showing the top of the system (so you at least see the notes).
+        const bottomWouldBeClipped = neededBottom > scrollTop + effectiveViewH - bottomMargin
+        if (bottomWouldBeClipped) {
+          // If we *can* satisfy both, scroll just enough to reveal the bottom (lyrics),
+          // but never beyond minScrollTop (which would hide the top of the system).
+          const feasibleTarget = Math.min(maxScrollTop, minScrollTop)
+          scrollTargetTop = feasibleTarget
         } else if (pos.top < scrollTop + topMargin) {
-          scrollTargetTop = pos.top - topMargin
+          scrollTargetTop = minScrollTop
         }
 
         if (scrollTargetTop != null) {
