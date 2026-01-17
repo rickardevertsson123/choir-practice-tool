@@ -91,6 +91,7 @@ export default function ScorePlayerPage() {
   ========================= */
   const scoreContainerRef = useRef<HTMLDivElement>(null)
   const playheadRef = useRef<HTMLDivElement>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const osmdRef = useRef<OpenSheetMusicDisplay | null>(null)
   const osmdWrapperRef = useRef<HTMLDivElement | null>(null)
   const osmdContainerRef = useRef<HTMLDivElement | null>(null)
@@ -236,19 +237,20 @@ export default function ScorePlayerPage() {
   }, [scoreTimeline])
 
   function computeDesiredZoom(availableWidthPx: number, availableHeightPx: number): number {
+    const isCompact = availableWidthPx < 700 || availableHeightPx < 520
     // A4-ish score wrapper width (matches CSS max width). We treat this as "1.0x".
     const BASE_PAGE_WIDTH_PX = 820
     // Rough page height for responsive fitting on short screens (mobile landscape).
     const BASE_PAGE_HEIGHT_PX = 1120
     // Slightly zoomed-out by default so more measures fit per system.
-    const DESKTOP_BASE_ZOOM = 0.88
+    const DESKTOP_BASE_ZOOM = 0.95
     // Don't let it get too small.
-    const MIN_ZOOM = 0.40
+    const MIN_ZOOM = isCompact ? 0.40 : 0.80
     const MAX_ZOOM = 1.05
     const fitW = availableWidthPx > 0 ? Math.min(1, availableWidthPx / BASE_PAGE_WIDTH_PX) : 1
     // Only fit height on short screens (e.g. mobile landscape). On desktop this can
     // make things feel "too zoomed out" even when width is fine.
-    const shouldFitHeight = availableHeightPx > 0 && availableHeightPx < 720
+    const shouldFitHeight = isCompact
     const fitH = shouldFitHeight ? Math.min(1, (availableHeightPx * 0.92) / BASE_PAGE_HEIGHT_PX) : 1
     const fit = Math.min(fitW, fitH)
     return clamp(DESKTOP_BASE_ZOOM * fit, MIN_ZOOM, MAX_ZOOM)
@@ -291,9 +293,35 @@ export default function ScorePlayerPage() {
       playhead.style.top = `${posCur.top}px`
       playhead.style.height = `${posCur.height}px`
     }
+
+    // After resize/zoom, keep the current system in view (especially when paused).
+    try {
+      if (posCur) {
+        const viewH = container.clientHeight
+        const reservedBottom = 96
+        const effectiveViewH = Math.max(120, viewH - reservedBottom)
+        const topMargin = 80
+        const bottomMargin = 140
+        const extraBelow = viewH < 520 ? 170 : 130
+        const neededBottom = posCur.top + posCur.height + extraBelow
+
+        let target: number | null = null
+        if (posCur.top < container.scrollTop + topMargin) {
+          target = posCur.top - topMargin
+        } else if (neededBottom > container.scrollTop + effectiveViewH - bottomMargin) {
+          // Keep top visible if we can't fit both top+bottom.
+          const minScrollTop = posCur.top - topMargin
+          const maxScrollTop = neededBottom - (effectiveViewH - bottomMargin)
+          target = Math.min(maxScrollTop, minScrollTop)
+        }
+        if (target != null) {
+          container.scrollTop = Math.max(0, Math.min(target, container.scrollHeight - container.clientHeight))
+        }
+      }
+    } catch {}
   }
 
-  async function applyOsmdZoomIfNeeded() {
+  async function applyOsmdZoomIfNeeded(opts?: { forceLayoutSync?: boolean }) {
     const osmd = osmdRef.current
     const wrapper = osmdWrapperRef.current
     const container = scoreContainerRef.current
@@ -302,7 +330,20 @@ export default function ScorePlayerPage() {
     const h = container?.clientHeight ?? 0
     const nextZoom = computeDesiredZoom(w, h)
     const prev = lastAppliedZoomRef.current
-    if (Math.abs(nextZoom - prev) < 0.01) return
+    const zoomChanged = Math.abs(nextZoom - prev) >= 0.01
+    if (!zoomChanged) {
+      // Even when zoom doesn't change, OSMD (autoResize) may have reflowed,
+      // which invalidates our cached cursor positions. Rebuild so playhead stays visible.
+      if (opts?.forceLayoutSync) {
+        try {
+          await buildPositionCache()
+          updatePlayheadAtCurrentTime()
+        } catch (e) {
+          console.warn('[osmd] failed to sync layout after resize', e)
+        }
+      }
+      return
+    }
 
     try {
       // OSMD 1.9.x uses a Zoom property, not setZoom().
@@ -319,7 +360,8 @@ export default function ScorePlayerPage() {
 
       // Extra safety pass: ensure at least the current system + lyrics padding fits in height.
       // This primarily targets small screens in landscape where the user must see both notes and text.
-      if (container && cursorPositionsRef.current.length > 0 && cursorStepsRef.current.length > 0) {
+      const isCompact = typeof window !== 'undefined' ? (window.innerWidth < 700 || window.innerHeight < 520) : false
+      if (isCompact && container && cursorPositionsRef.current.length > 0 && cursorStepsRef.current.length > 0) {
         const viewH = container.clientHeight
         // Bottom icon bar visually covers some of the score container.
         const reservedBottom = 96
@@ -1578,7 +1620,7 @@ export default function ScorePlayerPage() {
     const onResize = () => {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
-        applyOsmdZoomIfNeeded()
+        applyOsmdZoomIfNeeded({ forceLayoutSync: true })
       })
     }
     window.addEventListener('resize', onResize)
@@ -1684,35 +1726,35 @@ export default function ScorePlayerPage() {
               </a>
             </h1>
           </div>
-          <button type="button" className="top-bar__infoBtn" aria-label="About" title="About" onClick={() => setAboutOpen(true)}>
-            ?
-          </button>
-        </div>
-      </header>
-
-      <main className="main-content">
-        <div className="score-section">
-          <div className="file-upload-section">
-            <label htmlFor="musicxml-file" className="file-upload-button">
-              Open MusicXML/MXL-file
-            </label>
+          <div className="top-bar__right">
+            <button type="button" className="top-bar__openFileBtn" onClick={() => fileInputRef.current?.click()}>
+              Open MusicXML / MXL
+            </button>
             <input
+              ref={fileInputRef}
               id="musicxml-file"
               type="file"
               accept=".xml,.musicxml,.mxl"
               onChange={handleFileSelect}
               className="file-input"
             />
-            {isLoading && <p className="status-text">Loading...</p>}
-            {error && <p className="error-text">{error}</p>}
+            <button type="button" className="top-bar__infoBtn" aria-label="About" title="About" onClick={() => setAboutOpen(true)}>
+              ?
+            </button>
           </div>
+        </div>
+      </header>
 
+      <main className="main-content">
+        <div className="score-section">
           <div ref={scoreContainerRef} id="score-container" className="score-container">
             <div className="osmd-wrapper">
               <div ref={osmdWrapperRef} className="osmd-wrapper__inner">
                 <div ref={osmdContainerRef} className="osmd-container" />
               </div>
             </div>
+            {isLoading && <div className="score-toast score-toast--loading">Loading…</div>}
+            {!!error && <div className="score-toast score-toast--error">{error}</div>}
             {!scoreTimeline && <p>Select a MusicXML or MXL file to display notes</p>}
 
             {scoreTimeline && (
