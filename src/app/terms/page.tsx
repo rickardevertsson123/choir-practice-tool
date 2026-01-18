@@ -44,10 +44,13 @@ ChoirUp is a practice tool, not a distribution service.
 
 ## 4. Responsible use
 
-ChoirUp is intended to be used in good faith.
+ChoirUp is intended to be used in good faith. However, ChoirUp reserves the right to take action whenever ChoirUp reasonably believes it is necessary to protect rights holders, users, or the service.
 
-If material is uploaded without the required rights and this comes to my attention, the material may be removed.
-In cases of repeated or serious misuse, access to the service may be restricted or suspended.
+If ChoirUp becomes aware of, or reasonably suspects, that uploaded material is shared without the required rights or permissions, ChoirUp may remove the material and may restrict, disable, or suspend accounts and/or groups — with or without prior notice.
+
+ChoirUp provides the service as-is and does not verify the legality of uploaded material.
+
+If you believe material on ChoirUp infringes copyright or other rights, please report it to ChoirUp. When reporting, include enough information for ChoirUp to identify the material and the relevant group, and (if applicable) a link or reference to the rights holder’s claim. Reports do not need to follow any specific legal format.
 
 ## 5. Privacy and data use
 
@@ -90,7 +93,20 @@ export default function TermsPage() {
       </div>
 
       <div style={{ marginTop: 16, background: '#fff', border: '1px solid #e5e7eb', borderRadius: 16, padding: 18, color: '#111827' }}>
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{TERMS_MD}</ReactMarkdown>
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={{
+            h1: (props) => <h1 style={{ margin: '6px 0 12px', lineHeight: 1.15 }} {...props} />,
+            h2: (props) => <h2 style={{ margin: '18px 0 10px', lineHeight: 1.2 }} {...props} />,
+            h3: (props) => <h3 style={{ margin: '18px 0 10px', lineHeight: 1.2 }} {...props} />,
+            p: (props) => <p style={{ margin: '12px 0' }} {...props} />,
+            ul: (props) => <ul style={{ margin: '10px 0 14px', paddingLeft: '1.25rem' }} {...props} />,
+            ol: (props) => <ol style={{ margin: '10px 0 14px', paddingLeft: '1.25rem' }} {...props} />,
+            li: (props) => <li style={{ margin: '6px 0' }} {...props} />,
+          }}
+        >
+          {TERMS_MD}
+        </ReactMarkdown>
       </div>
     </div>
   )

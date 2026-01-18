@@ -30,8 +30,17 @@ export default function HomePage() {
 
             <div className={styles.tagline}>Practice together. Sing better. Share music responsibly.</div>
             <div className={styles.lede}>
-              ChoirUp is a free practice tool for singers and choirs. Practice music locally in your browser, or—if your group has the right to share
-              material—create a private group and practice together in a controlled and responsible way.
+              ChoirUp is a free practice tool for singers and choirs.
+              Play individual parts, sing or play along, and get <strong>live pitch feedback</strong>—with gentle visual markings in the score to help you improve.
+            </div>
+
+            <div className={styles.productWrap} aria-label="Product screenshot">
+              <img
+                className={styles.productImg}
+                src="/product.PNG"
+                alt="ChoirUp in use: score playback with pitch overlay and marked mistakes"
+                loading="lazy"
+              />
             </div>
           </div>
         </div>
