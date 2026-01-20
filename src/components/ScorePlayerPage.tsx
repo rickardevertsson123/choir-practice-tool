@@ -105,6 +105,7 @@ export default function ScorePlayerPage() {
   const cursorStepsRef = useRef<Array<{ step: number; musicalTime: number }>>([])
   const cursorPositionsRef = useRef<Array<{ step: number; left: number; top: number; height: number }>>([])
   const positionsReadyRef = useRef(false)
+  const buildPositionCacheSeqRef = useRef(0)
 
   /* =========================
      REFS: PLAYER / TIMELINE
@@ -220,6 +221,7 @@ export default function ScorePlayerPage() {
   const [osmdZoom, setOsmdZoom] = useState(1)
   const lastAppliedZoomRef = useRef<number>(1)
   const [timbre, setTimbre] = useState<SynthTimbre>('vocal')
+  const lastLayoutWidthRef = useRef<number>(0)
 
   // Avoid unnecessary rerenders from the detect loop by only committing
   // user-visible changes (rounded values) to React state.
@@ -237,24 +239,16 @@ export default function ScorePlayerPage() {
     if (!scoreTimeline) setActivePanel('none')
   }, [scoreTimeline])
 
-  function computeDesiredZoom(availableWidthPx: number, availableHeightPx: number): number {
-    const isCompact = availableWidthPx < 700 || availableHeightPx < 520
-    // A4-ish score wrapper width (matches CSS max width). We treat this as "1.0x".
+  function computeFitWidthZoom(wrapperWidthPx: number): number {
     const BASE_PAGE_WIDTH_PX = 820
-    // Rough page height for responsive fitting on short screens (mobile landscape).
-    const BASE_PAGE_HEIGHT_PX = 1120
-    // Slightly zoomed-out by default so more measures fit per system.
     const DESKTOP_BASE_ZOOM = 0.95
-    // Don't let it get too small.
-    const MIN_ZOOM = isCompact ? 0.40 : 0.80
+    // Small/compact screens: allow more zoom-out. This is especially important on
+    // mobile landscape where height is limited (even if width is large).
+    const isSmall = typeof window !== 'undefined' ? (window.innerWidth < 700 || window.innerHeight < 520) : false
+    const MIN_ZOOM = isSmall ? 0.40 : 0.80
     const MAX_ZOOM = 1.05
-    const fitW = availableWidthPx > 0 ? Math.min(1, availableWidthPx / BASE_PAGE_WIDTH_PX) : 1
-    // Only fit height on short screens (e.g. mobile landscape). On desktop this can
-    // make things feel "too zoomed out" even when width is fine.
-    const shouldFitHeight = isCompact
-    const fitH = shouldFitHeight ? Math.min(1, (availableHeightPx * 0.92) / BASE_PAGE_HEIGHT_PX) : 1
-    const fit = Math.min(fitW, fitH)
-    return clamp(DESKTOP_BASE_ZOOM * fit, MIN_ZOOM, MAX_ZOOM)
+    const fitW = wrapperWidthPx > 0 ? Math.min(1, wrapperWidthPx / BASE_PAGE_WIDTH_PX) : 1
+    return clamp(DESKTOP_BASE_ZOOM * fitW, MIN_ZOOM, MAX_ZOOM)
   }
 
   function updatePlayheadAtCurrentTime() {
@@ -322,93 +316,42 @@ export default function ScorePlayerPage() {
     } catch {}
   }
 
-  async function applyOsmdZoomIfNeeded(opts?: { forceLayoutSync?: boolean }) {
+  async function syncOsmdLayout(reason: 'load' | 'resize' | 'manual' = 'manual') {
     const osmd = osmdRef.current
     const wrapper = osmdWrapperRef.current
     const container = scoreContainerRef.current
-    if (!osmd || !wrapper) return
+    if (!osmd || !wrapper || !container) return
+
     const w = wrapper.clientWidth
-    const h = container?.clientHeight ?? 0
-    const nextZoom = computeDesiredZoom(w, h)
-    const prev = lastAppliedZoomRef.current
-    const zoomChanged = Math.abs(nextZoom - prev) >= 0.01
-    if (!zoomChanged) {
-      // Even when zoom doesn't change, OSMD (autoResize) may have reflowed,
-      // which invalidates our cached cursor positions. Rebuild so playhead stays visible.
-      if (opts?.forceLayoutSync) {
-        try {
-          await buildPositionCache()
-          updatePlayheadAtCurrentTime()
-        } catch (e) {
-          console.warn('[osmd] failed to sync layout after resize', e)
-        }
-      }
-      return
-    }
+    if (!Number.isFinite(w) || w <= 0) return
+
+    const nextZoom = computeFitWidthZoom(w)
+    const prevZoom = lastAppliedZoomRef.current
+    const zoomChanged = Math.abs(nextZoom - prevZoom) > 0.005
+    const widthChanged = Math.abs(w - lastLayoutWidthRef.current) > 1
+    lastLayoutWidthRef.current = w
+
+    // If nothing meaningful changed, bail early.
+    if (!zoomChanged && !widthChanged && reason !== 'load') return
 
     try {
-      // OSMD 1.9.x uses a Zoom property, not setZoom().
-      if (typeof (osmd as any).Zoom !== 'undefined') {
-        ;(osmd as any).Zoom = nextZoom
-      } else {
-        ;(osmd as any).zoom = nextZoom
-      }
-      osmd.render()
-      lastAppliedZoomRef.current = nextZoom
-      setOsmdZoom(nextZoom)
-      // Zoom affects cursor geometry, so rebuild position cache.
-      await buildPositionCache()
-
-      // Extra safety pass: ensure at least the current system + lyrics padding fits in height.
-      // This primarily targets small screens in landscape where the user must see both notes and text.
-      const isCompact = typeof window !== 'undefined' ? (window.innerWidth < 700 || window.innerHeight < 520) : false
-      if (isCompact && container && cursorPositionsRef.current.length > 0 && cursorStepsRef.current.length > 0) {
-        const viewH = container.clientHeight
-        // Bottom icon bar visually covers some of the score container.
-        const reservedBottom = 96
-        const visibleH = Math.max(120, viewH - reservedBottom)
-
-        // Approximate current step index from current playback time.
-        const player = playerRef.current
-        const timeline = timelineRef.current
-        if (player && timeline) {
-          const tNow = player.getCurrentTime()
-          let musicalTime = (tNow * timeline.tempoBpm) / 240
-          const steps = cursorStepsRef.current
-          const lastIdx = steps.length - 1
-          const maxMusicalTime = steps[lastIdx]?.musicalTime ?? 0
-          musicalTime = Math.max(0, Math.min(musicalTime, maxMusicalTime))
-          let i = 0
-          while (i < lastIdx && steps[i + 1].musicalTime <= musicalTime) i++
-          while (i > 0 && steps[i].musicalTime > musicalTime) i--
-          const pos = cursorPositionsRef.current[i]
-          if (pos) {
-            const extraBelow = viewH < 520 ? 190 : 140
-            const extraAbove = 40
-            const needed = pos.height + extraAbove + extraBelow
-            if (needed > visibleH + 8) {
-              const factor = clamp(visibleH / needed, 0.2, 1.0)
-              const adjustedZoom = clamp(nextZoom * factor, 0.40, nextZoom)
-              if (adjustedZoom < nextZoom - 0.01) {
-                if (typeof (osmd as any).Zoom !== 'undefined') {
-                  ;(osmd as any).Zoom = adjustedZoom
-                } else {
-                  ;(osmd as any).zoom = adjustedZoom
-                }
-                osmd.render()
-                lastAppliedZoomRef.current = adjustedZoom
-                setOsmdZoom(adjustedZoom)
-                await buildPositionCache()
-              }
-            }
-          }
+      if (zoomChanged) {
+        // OSMD 1.9.x uses a Zoom property, not setZoom().
+        if (typeof (osmd as any).Zoom !== 'undefined') {
+          ;(osmd as any).Zoom = nextZoom
+        } else {
+          ;(osmd as any).zoom = nextZoom
         }
+        lastAppliedZoomRef.current = nextZoom
+        setOsmdZoom(nextZoom)
       }
 
-      // Keep playhead aligned even when paused.
-      updatePlayheadAtCurrentTime()
+      // Render after any layout-affecting change.
+      osmd.render()
+
+      await buildPositionCache()
     } catch (e) {
-      console.warn('[osmd] failed to apply zoom', e)
+      console.warn('[osmd] layout sync failed', e)
     }
   }
   /* =========================
@@ -437,7 +380,7 @@ export default function ScorePlayerPage() {
     if (!osmdContainerRef.current || osmdRef.current) return
     try {
       osmdRef.current = new OpenSheetMusicDisplay(osmdContainerRef.current, {
-        autoResize: true,
+        autoResize: false,
         backend: 'svg',
         followCursor: false,
         drawingParameters: 'compact'
@@ -528,9 +471,7 @@ export default function ScorePlayerPage() {
   async function loadXmlContent(xmlContent: string) {
     if (!osmdRef.current) throw new Error('OSMD saknas')
     await osmdRef.current.load(xmlContent)
-    await osmdRef.current.render()
-    // After first render we can compute responsive zoom and re-render.
-    await applyOsmdZoomIfNeeded()
+    await syncOsmdLayout('load')
 
     osmdRef.current.cursor.show()
     osmdRef.current.cursor.reset()
@@ -1500,6 +1441,8 @@ export default function ScorePlayerPage() {
      PLAYHEAD + CURSOR POSITION CACHE
   ========================= */
   async function buildPositionCache(): Promise<void> {
+    // "Single-flight" cache rebuild: only the latest call is allowed to commit results.
+    const runId = ++buildPositionCacheSeqRef.current
     positionsReadyRef.current = false
     if (!osmdRef.current || !scoreContainerRef.current || cursorStepsRef.current.length === 0) {
       cursorPositionsRef.current = []
@@ -1509,14 +1452,28 @@ export default function ScorePlayerPage() {
       return
     }
 
-    // Wait a frame to ensure OSMD has painted its cursor elements
+    const container = scoreContainerRef.current
+    const osmd = osmdRef.current
+
+    // Keep trail canvas dimensions in sync with the scrollable score area.
+    // This ensures trail drawing uses the same coordinate system as cached cursor positions.
+    const canvas = trailCanvasRef.current
+    if (canvas) {
+      canvas.width = Math.max(1, container.scrollWidth || container.clientWidth || 1)
+      canvas.height = Math.max(1, container.scrollHeight || container.clientHeight || 1)
+    }
+
+    // Wait 2 frames after render so layout settles before measuring cursor rects.
     await new Promise(requestAnimationFrame)
+    await new Promise(requestAnimationFrame)
+    if (runId !== buildPositionCacheSeqRef.current) return
 
     cursorPositionsRef.current = []
-    osmdRef.current.cursor.reset()
+    osmd.cursor.reset()
 
     for (let i = 0; i < cursorStepsRef.current.length; i++) {
-      const cursorElement = osmdRef.current.cursor.cursorElement
+      if (runId !== buildPositionCacheSeqRef.current) return
+      const cursorElement = osmd.cursor.cursorElement
       if (cursorElement) {
         // Keep OSMD cursor invisible; we use our own playhead overlay for a smooth
         // visual marker. (Opacity preserves layout/geometry so measurements still work.)
@@ -1524,23 +1481,24 @@ export default function ScorePlayerPage() {
         ;(cursorElement as any).style.pointerEvents = 'none'
 
         const cursorRect = cursorElement.getBoundingClientRect()
-        const containerRect = scoreContainerRef.current.getBoundingClientRect()
+        const containerRect = container.getBoundingClientRect()
 
         cursorPositionsRef.current.push({
           step: i,
-          left: cursorRect.left - containerRect.left + scoreContainerRef.current.scrollLeft,
-          top: cursorRect.top - containerRect.top + scoreContainerRef.current.scrollTop,
+          left: cursorRect.left - containerRect.left + container.scrollLeft,
+          top: cursorRect.top - containerRect.top + container.scrollTop,
           height: cursorRect.height
         })
       }
 
-      if (!osmdRef.current.cursor.Iterator.EndReached) {
-        osmdRef.current.cursor.next()
+      if (!osmd.cursor.Iterator.EndReached) {
+        osmd.cursor.next()
       }
     }
 
-    osmdRef.current.cursor.reset()
-    osmdRef.current.cursor.update()
+    if (runId !== buildPositionCacheSeqRef.current) return
+    osmd.cursor.reset()
+    osmd.cursor.update()
     positionsReadyRef.current = true
     updatePlayheadAtCurrentTime()
   }
@@ -1657,22 +1615,37 @@ export default function ScorePlayerPage() {
     return () => cancelAnimationFrame(raf)
   }, [scoreTimeline])
 
-  // Keep OSMD zoom responsive to viewport changes (desktop and mobile orientation).
+  // Keep OSMD layout in sync with the rendered page width (A4-like) using ResizeObserver.
   useEffect(() => {
     if (!scoreTimeline) return
+    const el = osmdWrapperRef.current
+    if (!el) return
+
     let raf = 0
-    const onResize = () => {
+    const schedule = () => {
       cancelAnimationFrame(raf)
       raf = requestAnimationFrame(() => {
-        applyOsmdZoomIfNeeded({ forceLayoutSync: true })
+        syncOsmdLayout('resize')
       })
     }
-    window.addEventListener('resize', onResize)
-    // Run once after mount / score load
-    onResize()
+
+    // Initial sync after score load.
+    schedule()
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const ro = new ResizeObserver(() => schedule())
+      ro.observe(el)
+      return () => {
+        cancelAnimationFrame(raf)
+        ro.disconnect()
+      }
+    }
+
+    // Fallback (older browsers)
+    window.addEventListener('resize', schedule)
     return () => {
       cancelAnimationFrame(raf)
-      window.removeEventListener('resize', onResize)
+      window.removeEventListener('resize', schedule)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scoreTimeline])
