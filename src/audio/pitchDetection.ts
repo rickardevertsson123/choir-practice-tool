@@ -90,10 +90,9 @@ export type DetectorKind = 'nacf' | 'pitchy';
 
 // Exported for A/B testing / future re-enable (avoids TS noUnusedLocals in builds).
 export function getDetectorKind(): DetectorKind {
-  // Vite exposes env vars on import.meta.env (only keys with VITE_ prefix).
-  // We read defensively so this module remains safe in AudioWorklet bundles too.
-  const raw = String(((import.meta as any)?.env?.VITE_PITCH_DETECTOR ?? 'pitchy')).toLowerCase();
-  return raw === 'nacf' ? 'nacf' : 'pitchy';
+  // Keep this module compatible with Next/Webpack and AudioWorklet runtimes.
+  // (Avoid `import.meta` access which triggers Webpack "Critical dependency" warnings.)
+  return 'pitchy';
 }
 
 function ensureWorkspace(n: number): Workspace {
