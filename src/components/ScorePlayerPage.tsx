@@ -222,6 +222,8 @@ export default function ScorePlayerPage() {
   const lastAppliedZoomRef = useRef<number>(1)
   const [timbre, setTimbre] = useState<SynthTimbre>('vocal')
   const lastLayoutWidthRef = useRef<number>(0)
+  const [userZoom, setUserZoom] = useState(1)
+  const userZoomRef = useRef(1)
 
   // Avoid unnecessary rerenders from the detect loop by only committing
   // user-visible changes (rounded values) to React state.
@@ -238,6 +240,25 @@ export default function ScorePlayerPage() {
   useEffect(() => {
     if (!scoreTimeline) setActivePanel('none')
   }, [scoreTimeline])
+
+  useEffect(() => {
+    userZoomRef.current = userZoom
+    // Avoid heavy work if score isn't loaded yet.
+    if (scoreTimeline) {
+      // Apply user zoom (throttled by buildPositionCache single-flight).
+      syncOsmdLayout('manual')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userZoom])
+
+  function getReservedBottomPx(): number {
+    if (typeof document === 'undefined') return 96
+    const el = document.querySelector('.bottom-icon-bar') as HTMLElement | null
+    if (!el) return 96
+    const h = el.getBoundingClientRect().height
+    // add a small buffer so lyrics aren't hidden under the bar
+    return Math.max(64, Math.ceil(h) + 10)
+  }
 
   function computeFitWidthZoom(wrapperWidthPx: number): number {
     const BASE_PAGE_WIDTH_PX = 820
@@ -293,7 +314,7 @@ export default function ScorePlayerPage() {
     try {
       if (posCur) {
         const viewH = container.clientHeight
-        const reservedBottom = 96
+        const reservedBottom = getReservedBottomPx()
         const effectiveViewH = Math.max(120, viewH - reservedBottom)
         const topMargin = 80
         const bottomMargin = 140
@@ -325,7 +346,24 @@ export default function ScorePlayerPage() {
     const w = wrapper.clientWidth
     if (!Number.isFinite(w) || w <= 0) return
 
-    const nextZoom = computeFitWidthZoom(w)
+    // Default zoom: fit-to-width (A4). On mobile landscape we also cap by height so
+    // the full system incl. lyrics is more likely to fit by default.
+    const fitWidthZoom = computeFitWidthZoom(w)
+    let baseZoom = fitWidthZoom
+    if (typeof window !== 'undefined') {
+      const isLandscape = window.innerWidth > window.innerHeight
+      const isCompactHeight = window.innerHeight < 520
+      if (isLandscape && isCompactHeight) {
+        const BASE_PAGE_HEIGHT_PX = 1120
+        const reservedBottom = getReservedBottomPx()
+        const effectiveH = Math.max(180, container.clientHeight - reservedBottom)
+        const fitH = Math.min(1, (effectiveH * 0.92) / BASE_PAGE_HEIGHT_PX)
+        const heightZoom = clamp(0.95 * fitH, 0.40, 1.05)
+        baseZoom = Math.min(fitWidthZoom, heightZoom)
+      }
+    }
+
+    const nextZoom = clamp(baseZoom * userZoomRef.current, 0.35, 1.2)
     const prevZoom = lastAppliedZoomRef.current
     const zoomChanged = Math.abs(nextZoom - prevZoom) > 0.005
     const widthChanged = Math.abs(w - lastLayoutWidthRef.current) > 1
@@ -1562,7 +1600,7 @@ export default function ScorePlayerPage() {
         const viewH = container.clientHeight
         // Bottom icon bar overlays the score container (fixed positioned), so treat that
         // space as unavailable when deciding whether lyrics/system fits.
-        const reservedBottom = 96
+        const reservedBottom = getReservedBottomPx()
         const effectiveViewH = Math.max(120, viewH - reservedBottom)
 
         const bottomMargin = 140
@@ -1959,6 +1997,31 @@ export default function ScorePlayerPage() {
                     <option value="expert">Expert</option>
                   </select>
                 </label>
+
+                <div className="tempo-control" style={{ marginTop: 12 }}>
+                  <h4>Zoom</h4>
+                  <div className="tempo-display">{Math.round(osmdZoom * 100)}%</div>
+                  <div className="tempo-buttons">
+                    <button type="button" onClick={() => setUserZoom(1)} className={userZoom === 1 ? 'active' : ''}>
+                      Reset
+                    </button>
+                    <button type="button" onClick={() => setUserZoom((z) => clamp(z - 0.05, 0.7, 1.4))}>
+                      −
+                    </button>
+                    <button type="button" onClick={() => setUserZoom((z) => clamp(z + 0.05, 0.7, 1.4))}>
+                      +
+                    </button>
+                  </div>
+                  <input
+                    type="range"
+                    min={0.7}
+                    max={1.4}
+                    step={0.05}
+                    value={userZoom}
+                    onChange={(e) => setUserZoom(parseFloat(e.target.value))}
+                    className="tempo-slider"
+                  />
+                </div>
 
                 <div className="tempo-control" style={{ marginTop: 12 }}>
                   <h4>Tempo</h4>

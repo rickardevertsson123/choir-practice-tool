@@ -1350,6 +1350,35 @@
   }
 }
 
+/* Mobile landscape: reclaim vertical space */
+@media (orientation: landscape) and (max-height: 520px) {
+  .bottom-icon-bar {
+    bottom: 8px;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: 12px;
+  }
+
+  .bottom-icon-bar__middle {
+    width: min(420px, 56vw);
+    gap: 6px;
+  }
+
+  .transport-icon-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+  }
+
+  .transport-bar__time {
+    font-size: 0.82rem;
+  }
+
+  .transport-bar__slider {
+    height: 5px;
+  }
+}
+
 .transport-icon-btn.is-active {
   border-color: rgba(220, 53, 69, 0.55);
   color: rgba(220, 53, 69, 0.85);
