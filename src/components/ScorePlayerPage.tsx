@@ -106,6 +106,7 @@ export default function ScorePlayerPage() {
   const cursorPositionsRef = useRef<Array<{ step: number; left: number; top: number; height: number }>>([])
   const positionsReadyRef = useRef(false)
   const buildPositionCacheSeqRef = useRef(0)
+  const lastUserScrollMsRef = useRef(0)
 
   /* =========================
      REFS: PLAYER / TIMELINE
@@ -250,6 +251,17 @@ export default function ScorePlayerPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userZoom])
+
+  // Track manual scrolling so autoscroll doesn't fight the user.
+  useEffect(() => {
+    const el = scoreContainerRef.current
+    if (!el) return
+    const onScroll = () => {
+      lastUserScrollMsRef.current = performance.now()
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll as any)
+  }, [scoreTimeline])
 
   function getReservedBottomPx(): number {
     if (typeof document === 'undefined') return 96
@@ -1603,11 +1615,13 @@ export default function ScorePlayerPage() {
         const reservedBottom = getReservedBottomPx()
         const effectiveViewH = Math.max(120, viewH - reservedBottom)
 
-        const bottomMargin = 140
-        const topMargin = 80
+        const bottomMargin = 120
+        const topMargin = 70
         // OSMD cursor height often doesn't include lyrics/text below the staff.
         // Add a safety padding so we scroll to reveal the full system incl. text.
-        const extraBelow = viewH < 520 ? 170 : 130
+        const isLandscapeCompact =
+          typeof window !== 'undefined' ? window.innerWidth > window.innerHeight && window.innerHeight < 520 : false
+        const extraBelow = isLandscapeCompact ? 260 : (viewH < 520 ? 190 : 140)
         const neededBottom = pos.top + pos.height + extraBelow
 
         // Keep the current system readable:
@@ -1615,6 +1629,10 @@ export default function ScorePlayerPage() {
         // - try to keep the lyrics/text below visible
         const minScrollTop = pos.top - topMargin
         const maxScrollTop = neededBottom - (effectiveViewH - bottomMargin)
+
+        // If user just scrolled manually, don't fight them unless we're clearly falling behind
+        // (e.g. bottom is clipped).
+        const userRecentlyScrolled = performance.now() - lastUserScrollMsRef.current < 900
 
         // If the system (incl. text) is taller than the available height, maxScrollTop can be < minScrollTop.
         // In that case, prefer showing the top of the system (so you at least see the notes).
@@ -1624,7 +1642,9 @@ export default function ScorePlayerPage() {
           // but never beyond minScrollTop (which would hide the top of the system).
           const feasibleTarget = Math.min(maxScrollTop, minScrollTop)
           scrollTargetTop = feasibleTarget
-        } else if (pos.top < scrollTop + topMargin) {
+        } else if (!userRecentlyScrolled && pos.top < scrollTop + 10) {
+          // Only scroll up when we've lost the notes completely (avoid fighting user
+          // who scrolled down to see lyrics).
           scrollTargetTop = minScrollTop
         }
 
